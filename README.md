@@ -33,7 +33,6 @@ src/common/      código usado por cliente e servidor
   protocol.c       linhas <-> mensagens JSON validadas
 src/server/      main do servidor
 src/client/      main do cliente
-third_party/     bibliotecas externas (cJSON)
 tests/unit/      testes das camadas framing/protocol
 tests/interop/   cenários em texto, independentes da linguagem
 docs/            especificação do protocolo e notas por fase
@@ -42,7 +41,10 @@ scripts/         utilitários (correr cenários de interop, etc.)
 
 ## Compilar e correr
 
+Dependência: [cJSON](https://github.com/DaveGamble/cJSON) para o JSON.
+
 ```sh
+sudo apt install libcjson-dev   # Ubuntu/Debian (Fedora: cjson-devel, Arch: cjson)
 make            # compila para bin/
 ./bin/server 5000
 ./bin/client <ip> 5000
