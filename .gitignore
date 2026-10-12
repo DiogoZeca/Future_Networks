@@ -11,9 +11,11 @@ core
 core.*
 vgcore.*
 
-# Wireshark captures (guardar só as que interessam, com git add -f)
+# Wireshark captures: por omissão ignoradas, excepto as que são prova de trabalho
 *.pcap
 *.pcapng
+!docs/captures/*.pcap
+!docs/captures/*.pcapng
 
 # Editores / SO
 .vscode/
