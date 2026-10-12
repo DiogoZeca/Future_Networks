@@ -19,8 +19,6 @@ O protocolo comum está em [`docs/PROTOCOL.md`](docs/PROTOCOL.md).
 | M5 | Descoberta UDP         | — |
 | M6 | Extensão               | — |
 
-Cada fase fica marcada com uma tag git (`m0`, `m1`, …).
-`git diff m1 m2` mostra exatamente o que mudou entre fases.
 Notas de cada fase em [`docs/milestones/`](docs/milestones/).
 
 ## Estrutura
@@ -44,7 +42,8 @@ scripts/         utilitários (correr cenários de interop, etc.)
 Dependência: [cJSON](https://github.com/DaveGamble/cJSON) para o JSON.
 
 ```sh
-sudo apt install libcjson-dev   # Ubuntu/Debian (Fedora: cjson-devel, Arch: cjson)
+sudo pacman -S cjson            # Arch
+sudo apt install libcjson-dev   # Ubuntu/Debian
 make            # compila para bin/
 ./bin/server 5000
 ./bin/client <ip> 5000
