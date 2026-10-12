@@ -11,7 +11,7 @@ O protocolo comum está em [`docs/PROTOCOL.md`](docs/PROTOCOL.md).
 
 | #  | Fase                   | Estado |
 |----|------------------------|--------|
-| M0 | Echo warm-up           | ⏳ |
+| M0 | Echo warm-up           | ✅ |
 | M1 | Framing + protocolo    | ⏳ |
 | M2 | Vários clientes        | ⏳ |
 | M3 | Comandos + spec        | ⏳ |
