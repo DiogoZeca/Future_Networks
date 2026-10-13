@@ -3,8 +3,9 @@
 Documento da branch `feat/m1-framing-contract`. Explica **o que foi feito, e
 porquê cada decisão** — é o material para a defesa desta parte do M1.
 
-> **Estado actual:** contrato e testes escritos; implementação por fazer.
-> `make test` dá **11 ok, 88 falhas**, de propósito.
+> **Estado actual:** implementado. `make test` e `make test SAN=1` dão
+> **119 ok, 0 falhas** (16 casos). Testes escritos antes do código (§4) e
+> validados com testes de mutação (§8).
 
 ---
 
@@ -44,9 +45,9 @@ num buffer e extrair só o que terminar em `\n`.
 | Ficheiro | O que é |
 |---|---|
 | `include/framing.h` | **o contrato** — constantes, `struct rxbuf`, retornos, API |
-| `src/common/framing.c` | **stubs** — a implementação vem a seguir |
+| `src/common/framing.c` | a implementação (começou como stubs, §4) |
 | `tests/unit/test_util.h` | runner mínimo (~50 linhas) |
-| `tests/unit/test_framing.c` | 14 casos de teste |
+| `tests/unit/test_framing.c` | 16 casos de teste |
 | `Makefile` | alvo `make test` |
 
 A camada **não sabe o que é JSON**. Só conhece bytes e o byte `0x0A`. É essa
@@ -193,7 +194,8 @@ sobre o `data`, e nos logs usar `%.*s` com o `out_len`.
 
 ## 4. Porquê stubs em vez de só os testes
 
-`src/common/framing.c` tem as três funções a devolver erro, com `/* TODO M1 */`.
+No commit `70e7fa6`, `src/common/framing.c` tinha as três funções a devolver
+erro, com `/* TODO M1 */`.
 
 Em C, um ficheiro de teste sem a implementação **nem sequer linka** — dá
 `undefined reference`. E um `make test` que não compila é indistinguível de um
@@ -234,6 +236,8 @@ acontecem ao acaso.
 | 20 | `'\0'` embebido | `out_len` ≠ `strlen(out)` |
 | 21 | 4095+`\n` / 4096+`\n` | aceite / rejeitado |
 | **22** | **resíduo 4095 + chunk 4096** | 8191 cabe em `RX_CAP` |
+| 23 | 4096 bytes sem `\n` | `RX_TOOLONG` logo, sem esperar |
+| 24 | duas mensagens byte a byte, sem `init` | 2 linhas — exercita `scanned` depois de uma extração |
 
 Três merecem destaque:
 
@@ -275,9 +279,9 @@ Acrescentar uma suite nova não exige mexer no Makefile: o `wildcard` sobre
 
 ---
 
-## 7. O que falta
+## 7. A implementação
 
-A implementação, em `src/common/framing.c`. A ordem das operações dentro do
+Em `src/common/framing.c`, comentada passo a passo com a numeração abaixo. A ordem das operações dentro do
 `rxbuf_next_line()` não é negociável — cada passo protege o seguinte:
 
 1. se `failed` → `RX_TOOLONG` (idempotente)
@@ -299,9 +303,11 @@ Duas armadilhas neste bloco:
 - **`memmove`, nunca `memcpy`**, no passo 8: as regiões sobrepõem-se, e `memcpy`
   nessas condições é comportamento indefinido. Só o ASan ou o valgrind apanham.
 
-E o `>=` do passo 4 (e não `>`) é o que faz o teste #7 passar e o #6 falhar: com
-`len == 4096` e ainda sem `\n`, qualquer linha que acabe ali terá pelo menos
-4097 bytes com o `\n`.
+E o `>=` do passo 4 (e não `>`): com `len == 4096` e ainda sem `\n`, qualquer
+linha que acabe ali terá pelo menos 4097 bytes com o `\n` — não vale a pena
+esperar. **Nenhum dos 14 testes originais distinguia `>=` de `>`** (os #6 e #7
+passam com os dois; e com `>` o pior caso é 4096 + 4096 = 8192, que ainda cabe).
+Foi a mutação da §8 que o mostrou, e o teste #23 passou a fixá-lo.
 
 ---
 
@@ -315,6 +321,32 @@ I4.  failed != 0  =>  len == 0 && scanned == 0
 I5.  RX_LINE  =>  out[*out_len] == '\0'  &&  1 <= *out_len <= RX_MAX_LINE-1
 ```
 
-Vale a pena pô-los em `assert()` à entrada e à saída de cada função: são
-gratuitos em release (`-DNDEBUG`) e, nos testes, transformam um bug de índice
-num *abort* com linha exacta em vez de dados corrompidos 200 ms depois.
+I1, I2 e I4 estão em `assert()` à entrada de cada função (`check_invariants`):
+são gratuitos em release (`-DNDEBUG`) e, nos testes, transformam um bug de índice
+num *abort* com linha exacta em vez de dados corrompidos 200 ms depois. O I3 fica
+de fora: verificá-lo é um `memchr` sobre `data[0..scanned)`, O(n) por chamada —
+anulava a razão de ser do `scanned`.
+
+---
+
+## 8. Testes de mutação: os testes apanham bugs?
+
+Testes que passam só provam alguma coisa se **falharem** quando o código está
+errado. Para o confirmar, introduziu-se de propósito um bug de cada vez e
+correu-se `make test SAN=1`:
+
+| Bug introduzido | Apanhado por |
+|---|---|
+| copiar para `out` depois de compactar (passos 7↔8) | #3 |
+| `memcpy` em vez de `memmove` | só ASan (`memcpy-param-overlap`) |
+| tirar todos os `\r` em vez de um | #5 |
+| devolver linhas vazias | #8 |
+| `>` em vez de `>=` no passo 4 | **ninguém** → criado o #23 |
+| esquecer `scanned = 0` depois do `memmove` | **ninguém** → criado o #24 (dispara o assert do I2) |
+| esquecer `scanned = len` no passo 4 | ninguém — só afeta desempenho (O(n²)), não o resultado |
+
+Lições:
+- o #2 (byte a byte) acabava logo depois da 1.ª linha, por isso nunca testava o
+  estado *a seguir* a uma extração — daí o #24;
+- o bug do `memcpy` mostra porque é que `make test SAN=1` é o que conta: sem o
+  ASan, passa.

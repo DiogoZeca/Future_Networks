@@ -7,10 +7,11 @@
  * determinística.
  *
  * Numeração: casos 1-10 vêm da tabela em docs/milestones/M1.md; 19-22 foram
- * acrescentados na revisão do plano.
+ * acrescentados na revisão do plano; 23-24 nasceram de testes de mutação
+ * (bugs introduzidos de propósito que nenhum dos outros apanhava).
  *
- * NOTA: neste commit FALHAM TODOS, de propósito — src/common/framing.c ainda
- * só tem stubs. Os testes definem o contrato antes de existir implementação.
+ * Foram escritos ANTES da implementação (commit 70e7fa6, contra stubs): são
+ * eles que definem o contrato.
  */
 #include "framing.h"
 #include "test_util.h"
@@ -284,6 +285,48 @@ static void caso_22_pior_caso_capacidade(void)
     CHECK_INT(rxbuf_pending(&rx), RX_CHUNK - 1);              /* o resto fica */
 }
 
+/* 23. Exactamente RX_MAX_LINE bytes e ainda sem '\n': ja e demasiado longa.
+ *     Qualquer '\n' que chegue a seguir daria uma linha de >= 4097 bytes, por
+ *     isso nao ha razao para esperar. Apanha o bug `>` em vez de `>=` no
+ *     passo 4, que nenhum outro teste apanhava: com `>`, um peer que mande
+ *     4096 bytes e pare fica a ser esperado em vez de ser recusado. */
+static void caso_23_limite_sem_newline(void)
+{
+    CASE(23, "4096 bytes sem '\\n' -> RX_TOOLONG logo, sem esperar");
+    size_t len = 0;
+
+    rxbuf_init(&rx);
+    memset(big, 'H', RX_MAX_LINE);
+    CHECK_INT(rxbuf_feed(&rx, big, RX_MAX_LINE), 0);
+    CHECK_INT(rxbuf_next_line(&rx, line, sizeof line, &len), RX_TOOLONG);
+    CHECK_INT(rxbuf_failed(&rx), 1);
+}
+
+/* 24. Duas mensagens byte a byte, SEM init entre elas.
+ *     O #2 acaba logo depois da primeira linha, por isso nunca exercita o
+ *     estado a seguir a uma extracao com scanned > 0. Este sim: apanha o bug
+ *     de esquecer `scanned = 0` depois do memmove (dispara o assert do I2; sem
+ *     asserts, o memchr recebe um comprimento "negativo" e o ASan apanha). */
+static void caso_24_duas_byte_a_byte(void)
+{
+    CASE(24, "duas mensagens byte a byte, sem init entre elas");
+    const char *in = "abc\nde\n";
+    size_t len = 0;
+    int linhas = 0;
+
+    rxbuf_init(&rx);
+    for (size_t i = 0; in[i] != '\0'; i++) {
+        CHECK_INT(rxbuf_feed(&rx, &in[i], 1), 0);
+        int r = rxbuf_next_line(&rx, line, sizeof line, &len);
+        CHECK_INT(r, in[i] == '\n' ? RX_LINE : RX_NEED);
+        if (r == RX_LINE)
+            linhas++;
+    }
+    CHECK_INT(linhas, 2);
+    CHECK_STR(line, "de");
+    CHECK_INT(rxbuf_pending(&rx), 0);
+}
+
 /* ------------------------------------------------------------------------ */
 
 int main(void)
@@ -302,5 +345,7 @@ int main(void)
     caso_20_nul_embebido();
     caso_21_fronteira();
     caso_22_pior_caso_capacidade();
+    caso_23_limite_sem_newline();
+    caso_24_duas_byte_a_byte();
     return t_report("framing");
 }
