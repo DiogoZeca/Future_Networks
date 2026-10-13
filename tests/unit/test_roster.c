@@ -1,19 +1,22 @@
 /*
  * test_roster.c — testes da lista de clientes partilhada.
  *
- * Duas famílias:
+ * Três famílias:
  *
  *   1-10   API sequencial, sem threads. Verificam o refcount, que é o que
  *          torna o broadcast fora do lock seguro.
  *   11-13  Concorrência a sério. São estes que justificam o milestone: um bug
  *          de lock não aparece com um cliente, aparece com cinco a entrar e
  *          sair ao mesmo tempo. Correr SEMPRE com `make test SAN=1` — é o
- *          AddressSanitizer que transforma "não deu crash" em prova.
+ *          AddressSanitizer que transforma "não deu crash" em prova. E com o
+ *          ThreadSanitizer numa compilação à parte: o ASan NÃO vê data races.
+ *   14     Quem ainda não fez NICK está ligado mas fora do chat. Nasceu de um
+ *          bug que o scripts/probe_m2.py apanhou, não de uma ideia à partida.
  *
  * Os clientes de teste usam fd = -1 (o contrato permite), exceto o caso 9 que
  * precisa de um fd real para verificar que o close() acontece.
  *
- * Escritos ANTES da implementação: src/server/roster.c ainda só tem stubs.
+ * Escritos ANTES da implementação (commit do contrato), contra stubs.
  */
 #include "roster.h"
 #include "test_util.h"

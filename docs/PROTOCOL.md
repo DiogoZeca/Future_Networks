@@ -1,4 +1,4 @@
-# Chat Protocol — v0.2 (draft)
+# Chat Protocol — v0.3 (draft)
 
 Shared specification for interoperability between groups (IF 2026/27).
 Message names and fields come from the course slides (slide 124) and are
@@ -49,7 +49,7 @@ against any server with `python3 scripts/interop.py <host> <port>`.
 | S → C     | `ERROR` | `{"type":"ERROR","code":409,"reason":"nick taken"}`            | Request refused                      |
 
 Our M1 implements `NICK`, `MSG`, `OK`, `CHAT`, `ERROR`. `PRIV`, `LIST`, `QUIT`,
-`USERS` and `EVENT` arrive in M2/M3; until then our server answers them with
+`EVENT` is implemented since M2. `USERS` arrives in M3; until then our server answers it with
 `ERROR 400 "unknown type"`.
 
 General rules:
@@ -86,13 +86,16 @@ General rules:
 | Does the sender of `MSG` receive its own `CHAT`? | **Yes.** It confirms the message reached the server, and clients must therefore **not** echo locally (it would appear twice). |
 | A client request (`MSG`; later `PRIV`, `LIST`, `QUIT`) before a successful `NICK` | `ERROR 401 "nick required"`. The connection stays open. |
 | `NICK` after a successful `NICK` | `ERROR 400 "nick already set"` (no nick change in M1). |
-| S→C types (`OK`, `CHAT`, `ERROR`) sent by a client | `ERROR 400 "unexpected type"`, in any state. |
+| S→C types (`OK`, `CHAT`, `ERROR`, `EVENT`) sent by a client | `ERROR 400 "unexpected type"`, in any state. |
 | Unknown `type` | `ERROR 400 "unknown type"`. |
 | Invalid JSON, missing field, wrong type, out of limits | `ERROR 400` with reason `invalid JSON` / `invalid field`. The connection stays open: the next line is handled normally. |
 | Who is `from` in a `CHAT`? | Always the nick of the sender's session. A `"from"` field sent by a client is ignored. |
 | Missing optional fields | `private` absent = `false`; `reason` absent = `""`. |
 | What does the sender of `PRIV` receive? | Open (M3). |
-| Exact `EVENT` text for join/leave | Open (M2). |
+| Exact `EVENT` text for join/leave | `"<nick> joined"` and `"<nick> left"` (the slide 124 example is `"rui joined"`). Clients should display `EVENT` as a notice, not as a chat line. |
+| Who receives an `EVENT`? | Everyone **except** the client it is about: whoever joins does not need to be told they joined. |
+| Does a client receive traffic before its `NICK` is accepted? | **No.** Between `accept()` and a successful `NICK` the connection exists but is not in the chat, so it gets no `CHAT` and no `EVENT`. The first line a client sees is always the answer to its own `NICK`. |
+| Does leaving before a successful `NICK` produce an `EVENT`? | **No.** Nobody knew that client was there. |
 | Does `QUIT` get an `OK` before the server closes? | Open (M3). |
 
 Rule of thumb: **strict when sending, tolerant when receiving.** A receiver never
@@ -162,6 +165,10 @@ Line too long — the server closes after the error:
 ```
 
 ## Changelog
+
+- v0.3 — M2: `EVENT` implemented (join/leave text, who receives it); a
+  connection only joins the chat after a successful `NICK`; `EVENT` added to
+  the S→C types a client may not send.
 
 - v0.2 — framing details (empty lines, max length, one object per line); field
   rules; semantics and error codes as proposals from our M1 implementation;

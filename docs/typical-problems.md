@@ -118,28 +118,26 @@ desligar?"*. São quatro cenários distintos, com sintomas diferentes.
 - **Sintoma:** crashes esporádicos, só com vários clientes, impossíveis de reproduzir.
 - **Porquê:** uma thread percorre a lista enquanto outra remove um cliente que saiu. Ponteiro pendente.
 - **Como evitar:** mutex na lista; **copiar a lista dentro do lock e enviar fora dele**.
-- **Estado:** `Por Resolver` - **M2**.
+- **Estado:** `Resolvido` - **M2**: `roster_snapshot()` copia dentro do lock; teste #4 (determinista) e #12 (5 threads a tirar retratos contra 5 a entrar/sair).
 
 ### 3.2 Enviar com o lock agarrado
 
 - **Sintoma:** o chat fica lento ou bloqueia completamente quando um cliente é lento.
 - **Porquê:** combina 2.4 com 3.1 - um `send()` que bloqueia dentro da secção crítica transforma um cliente lento num deadlock global.
 - **Como evitar:** o lock protege a *estrutura de dados*, nunca a *E/S*. Copiar e sair.
-- **Estado:** `Por Resolver` - **M2**.
+- **Estado:** `Resolvido` - **M2**: `deliver()` envia fora do lock; o lock do roster nunca e segurado durante um `send()`.
 
 ### 3.3 Mensagens de vários emissores intercaladas no mesmo socket
 
 - **Sintoma:** o cliente recebe JSON corrompido: metade de uma mensagem, metade de outra.
 - **Porquê:** duas threads a fazer `send_all()` no mesmo fd ao mesmo tempo. Cada `send()` é atómico, mas o ciclo do `send_all()` não é.
 - **Como evitar:** um mutex de escrita **por cliente** (já previsto no `M2.md`).
-- **Estado:** `Por Resolver` - **M2**.
-
-### 3.4 Use-after-free na saída de um cliente
+- **Estado:** `Resolvido` - **M2**: `wlock` por cliente em `send_line_to()`. **Nota honesta:** nao esta *demonstrado* - o TSan nao ve esta corrida (e logica, no socket, nao de memoria) e com `SO_SNDBUF` de 16 KB e linhas de 4 KB o `send_all()` quase nunca faz mais de uma iteracao. E protecao para o buffer cheio (cliente que nao le), cenario de M4. Use-after-free na saída de um cliente
 
 - **Sintoma:** crash ou corrupção quando alguém sai durante um broadcast.
 - **Porquê:** a thread do cliente liberta a sua estrutura enquanto outra ainda a tem na cópia da lista.
 - **Como evitar:** contagem de referências, ou remover da lista e só libertar depois de garantir que mais ninguém tem a referência. Em C isto é trabalho a sério - decidir a estratégia **antes** de escrever o M2, não durante.
-- **Estado:** `Por Resolver` - **M2**. Testar com `make SAN=1`.
+- **Estado:** `Resolvido` - **M2**: contagem de referencias no `roster` (`roster_snapshot` incrementa dentro do lock, `client_release` larga). Teste #4 e #12 com ASan; servidor sob ThreadSanitizer com 10 clientes: zero races.
 
 ---
 

@@ -13,7 +13,7 @@ O protocolo comum está em [`docs/PROTOCOL.md`](docs/PROTOCOL.md).
 |----|------------------------|--------|
 | M0 | Echo warm-up           | DONE |
 | M1 | Framing + protocolo    | DONE |
-| M2 | Vários clientes        | TODO |
+| M2 | Vários clientes        | DONE |
 | M3 | Comandos + spec        | TODO |
 | M4 | Robustez e testes      | TODO |
 | M5 | Descoberta UDP         | TODO |
