@@ -58,7 +58,8 @@ void session_handle(struct session *s, const char *line, size_t len,
         return;
 
     default:
-        /* OK, CHAT, ERROR: válidos no protocolo, mas só no sentido S->C. */
+        /* OK, CHAT, ERROR, EVENT: válidos no protocolo, mas só no sentido
+         * S->C. Um cliente que os envie está enganado, em qualquer estado. */
         reply_error(reply, 400, SESS_R_UNEXPECTED);
         return;
     }

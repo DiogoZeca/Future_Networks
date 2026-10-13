@@ -10,9 +10,9 @@
  *
  *   socket --bytes--> framing --linhas--> protocol --struct msg--> lógica
  *
- * Só os tipos do M1 (slide 123: NICK e MSG, mais as respostas OK, CHAT e
- * ERROR). PRIV, LIST, QUIT, USERS e EVENT entram no M3 — até lá são "unknown
- * type".
+ * Tipos do M1 (slide 123: NICK e MSG, mais as respostas OK, CHAT e ERROR) e,
+ * desde o M2, EVENT — o slide 123 põe "join and leave notices" no M2, não no
+ * M3. PRIV, LIST, QUIT e USERS entram no M3; até lá são "unknown type".
  */
 #ifndef PROTOCOL_H
 #define PROTOCOL_H
@@ -61,7 +61,8 @@ enum msg_type {
     MT_MSG,         /* C -> S */
     MT_OK,          /* S -> C */
     MT_CHAT,        /* S -> C */
-    MT_ERROR        /* S -> C */
+    MT_ERROR,       /* S -> C */
+    MT_EVENT        /* S -> C  (M2: entradas e saídas)                      */
 };
 
 /* Buffers fixos, sem malloc: logo sem free para esquecer. Só os campos do
@@ -70,7 +71,7 @@ struct msg {
     enum msg_type type;
     char nick[PROTO_NICK_MAX + 1];     /* NICK                               */
     char from[PROTO_NICK_MAX + 1];     /* CHAT                               */
-    char text[PROTO_TEXT_MAX + 1];     /* MSG, CHAT                          */
+    char text[PROTO_TEXT_MAX + 1];     /* MSG, CHAT, EVENT                   */
     int  is_private;                   /* CHAT "private" (ausente = 0)       */
     int  code;                         /* ERROR, 100..999                    */
     char reason[PROTO_REASON_MAX + 1]; /* ERROR (ausente = "")               */

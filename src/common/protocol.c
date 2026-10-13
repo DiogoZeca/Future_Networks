@@ -47,6 +47,7 @@ static const struct { enum msg_type t; const char *name; } TYPES[] = {
     { MT_OK,    "OK"    },
     { MT_CHAT,  "CHAT"  },
     { MT_ERROR, "ERROR" },
+    { MT_EVENT, "EVENT" },
 };
 #define N_TYPES (sizeof TYPES / sizeof TYPES[0])
 
@@ -165,6 +166,14 @@ int proto_parse(const char *line, size_t len, struct msg *out, struct proto_err 
         break;
     }
 
+    case MT_EVENT:
+        /* Só "text". O slide 124 dá {"type":"EVENT","text":"rui joined"}:
+         * o texto é livre, por isso vale a mesma regra do text de um CHAT
+         * (sem caracteres de controlo, logo sem '\n' a partir a linha). */
+        if (!get_str(root, "text", out->text, sizeof out->text, proto_valid_text))
+            goto out;
+        break;
+
     default:                                /* string válida, tipo desconhecido */
         err->reason = PROTO_R_TYPE;
         goto out;
@@ -190,6 +199,7 @@ static int valid_msg(const struct msg *m)
     case MT_OK:    return 1;
     case MT_CHAT:  return proto_valid_nick(m->from) && proto_valid_text(m->text);
     case MT_ERROR: return valid_code(m->code) && valid_reason(m->reason);
+    case MT_EVENT: return proto_valid_text(m->text);
     default:       return 0;
     }
 }
@@ -231,6 +241,9 @@ int proto_encode(const struct msg *m, char *out, size_t cap, size_t *out_len)
         if (!cJSON_AddNumberToObject(root, "code", m->code) ||
             !cJSON_AddStringToObject(root, "reason", m->reason))
             goto out;
+        break;
+    case MT_EVENT:
+        if (!cJSON_AddStringToObject(root, "text", m->text)) goto out;
         break;
     }
 

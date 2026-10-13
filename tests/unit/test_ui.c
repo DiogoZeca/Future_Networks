@@ -130,6 +130,38 @@ static void caso_46_nick_argv(void)
     CHECK_INT(proto_valid_nick("123456789012345678901234567890123"), 0);
 }
 
+/* 47. O cliente tem de MOSTRAR os EVENT (M2).
+ *
+ *     O switch do ui_format tem um `default`, por isso o compilador nao avisa
+ *     se faltar um caso: sem este teste, um EVENT aparecia como "[?]" e as
+ *     entradas e saidas passavam despercebidas. O '*' a frente distingue a
+ *     vista um aviso do servidor de uma mensagem de alguem, que leva "<nick>". */
+static void caso_47_event(void)
+{
+    char out[256];
+
+    CASE(47, "EVENT de entrada");
+    struct msg e = { .type = MT_EVENT };
+    memcpy(e.text, "rui joined", sizeof "rui joined");
+    ui_format(&e, out, sizeof out);
+    CHECK_STR(out, "* rui joined");
+
+    CASE(47, "EVENT de saida");
+    memcpy(e.text, "ana left", sizeof "ana left");
+    ui_format(&e, out, sizeof out);
+    CHECK_STR(out, "* ana left");
+
+    CASE(47, "nao cai no default \"[?]\"");
+    CHECK(strcmp(out, "[?]") != 0);
+
+    CASE(47, "um EVENT longo e truncado, nunca escreve fora do buffer");
+    char curto[8];
+    memset(e.text, 'x', 100);
+    e.text[100] = '\0';
+    ui_format(&e, curto, sizeof curto);
+    CHECK_INT(strlen(curto), sizeof curto - 1);
+}
+
 int main(void)
 {
     caso_40_linha_normal();
@@ -139,5 +171,6 @@ int main(void)
     caso_44_formato();
     caso_45_truncar();
     caso_46_nick_argv();
+    caso_47_event();
     return t_report("ui");
 }

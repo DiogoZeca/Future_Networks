@@ -368,6 +368,58 @@ static void caso_32_chaves_case_sensitive(void)
     CHECK_STR(err.reason, PROTO_R_FIELD);
 }
 
+/* 33. EVENT — entradas e saidas (M2).
+ *
+ *     Desceu do M3 para o M2 porque o slide 123 poe "join and leave notices"
+ *     no M2. So tem "text", e o exemplo do slide 124 e
+ *     {"type":"EVENT","text":"rui joined"}.
+ *
+ *     Vale a pena testar o parse E o encode: o parse porque um servidor de
+ *     outro grupo vai mandar-nos EVENT e o nosso cliente tem de os aceitar;
+ *     o encode porque somos nos a produzi-los no broadcast. */
+static void caso_33_event(void)
+{
+    size_t len;
+
+    CASE(33, "parse de um EVENT do slide 124");
+    CHECK_INT(parse("{\"type\":\"EVENT\",\"text\":\"rui joined\"}"), 0);
+    CHECK_INT(m.type, MT_EVENT);
+    CHECK_STR(m.text, "rui joined");
+
+    CASE(33, "encode de um EVENT da os bytes exactos do slide");
+    struct msg e = { .type = MT_EVENT };
+    memcpy(e.text, "rui joined", sizeof "rui joined");
+    CHECK_INT(proto_encode(&e, out, sizeof out, &len), 0);
+    CHECK_STR(out, "{\"type\":\"EVENT\",\"text\":\"rui joined\"}\n");
+
+    CASE(33, "round-trip: o que codificamos volta a dar parse igual");
+    CHECK_INT(proto_parse(out, sem_nl(len), &m, &err), 0);
+    CHECK_INT(m.type, MT_EVENT);
+    CHECK_STR(m.text, "rui joined");
+
+    CASE(33, "EVENT sem \"text\" -> 400");
+    CHECK_INT(parse("{\"type\":\"EVENT\"}"), -1);
+    CHECK_STR(err.reason, PROTO_R_FIELD);
+
+    CASE(33, "EVENT com \"text\" vazio -> 400 (text tem minimo 1)");
+    CHECK_INT(parse("{\"type\":\"EVENT\",\"text\":\"\"}"), -1);
+
+    CASE(33, "EVENT com '\\n' no texto -> 400: partiria a linha no receptor");
+    CHECK_INT(parse("{\"type\":\"EVENT\",\"text\":\"a\\nb\"}"), -1);
+
+    CASE(33, "\"event\" em minusculas nao e EVENT");
+    CHECK_INT(parse("{\"type\":\"event\",\"text\":\"x\"}"), -1);
+    CHECK_STR(err.reason, PROTO_R_TYPE);
+
+    CASE(33, "proto_type_name(MT_EVENT)");
+    CHECK_STR(proto_type_name(MT_EVENT), "EVENT");
+
+    CASE(33, "text no limite (1024) ainda cabe numa linha");
+    CHECK_INT(parse(json_with("EVENT", "text", 'e', PROTO_TEXT_MAX)), 0);
+    CHECK_INT(proto_encode(&m, out, sizeof out, &len), 0);
+    CHECK_INT(parse(json_with("EVENT", "text", 'e', PROTO_TEXT_MAX + 1)), -1);
+}
+
 /* ------------------------------------------------------------------------ */
 
 int main(void)
@@ -387,5 +439,6 @@ int main(void)
     caso_30_servidor_para_cliente();
     caso_31_exemplos_do_slide();
     caso_32_chaves_case_sensitive();
+    caso_33_event();
     return t_report("protocol");
 }

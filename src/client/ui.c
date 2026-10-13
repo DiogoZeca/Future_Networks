@@ -56,6 +56,11 @@ void ui_format(const struct msg *m, char *out, size_t cap)
     case MT_OK:
         snprintf(out, cap, "[ok]");
         break;
+    case MT_EVENT:
+        /* Entradas e saídas (M2). O '*' à frente distingue à vista um aviso do
+         * servidor de uma mensagem de alguém, que leva "<nick>". */
+        snprintf(out, cap, "* %s", m->text);
+        break;
     default:
         snprintf(out, cap, "[?]");
         break;
