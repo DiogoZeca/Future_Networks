@@ -23,8 +23,8 @@
  * Agora o accept() lança uma thread e volta imediatamente ao ciclo.
  *
  *
- * AS TRÊS REGRAS DE CONCORRÊNCIA
- * ------------------------------
+ * AS QUATRO REGRAS DE CONCORRÊNCIA
+ * --------------------------------
  * 1. O broadcast tira um RETRATO da lista dentro do lock e envia FORA dele.
  *    Com o lock agarrado, um cliente que não lê (portátil suspenso, Ctrl+S no
  *    terminal) encheria o buffer de envio, o send() bloquearia, e o chat
@@ -39,8 +39,17 @@
  * 3. Cada escrita num socket leva o wlock DESSE cliente. send() é atómico, mas
  *    o ciclo do send_all() não é: duas threads a escrever ao mesmo tempo no
  *    mesmo fd intercalam metade de uma mensagem com metade de outra, e o
- *    cliente recebe JSON corrompido (§3.3). O wlock é por cliente, por isso um
- *    cliente lento só atrasa quem lhe escreve, não o resto do chat.
+ *    cliente recebe JSON corrompido (§3.3).
+ *
+ * 4. Nenhum envio pode bloquear para sempre. As regras 1-3 tiram o send() de
+ *    dentro do lock do roster, mas NÃO chegam: num chat com broadcast toda a
+ *    gente escreve a toda a gente, e um cliente que não lê (portátil
+ *    suspenso, Ctrl+Z, Ctrl+S) deixava presa a thread de quem lhe escrevesse
+ *    — e, atrás dela, todas as outras à espera do wlock dele. O chat inteiro
+ *    congelava (medido: ~2,6 MB depois). Por isso cada envio tem um PRAZO
+ *    (SEND_TIMEOUT_MS, send_all_timeout()); quem o esgota é marcado `dead` e
+ *    desligado, e ninguém volta a tentar escrever-lhe (§2.4, slide 125:
+ *    "A slow or stuck client blocks everyone. Use timeouts").
  *
  * A mensagem é codificada UMA vez e os mesmos bytes vão para toda a gente:
  * é mais barato e garante que todos recebem exatamente o mesmo.
@@ -60,7 +69,14 @@
 #include <string.h>   /* strerror */
 #include <unistd.h>
 
-#define DEFAULT_PORT "5000"
+#define DEFAULT_PORT    "5000"
+
+/* Quanto tempo um cliente pode estar sem ler antes de ser desligado. Tem de
+ * ser muito maior do que qualquer atraso normal (um portátil em Wi-Fi fraco)
+ * e curto o suficiente para o resto do chat não dar pela pausa como avaria. */
+#define SEND_TIMEOUT_MS 5000
+
+#define SRV_R_FULL "server full"   /* ERROR 503, PROTOCOL.md §5 */
 
 /* A lista de clientes é global porque é o que as threads partilham. Toda a
  * concorrência que lhe diz respeito está dentro do roster.c. */
@@ -68,22 +84,51 @@ static struct roster R;
 
 /* ---- Envio -------------------------------------------------------------- */
 
-/* Escreve uma linha já codificada num cliente, com o wlock dele.
- * Devolve 0, ou -1 se a ligação morreu (o chamador decide o que fazer). */
+/* Escreve uma linha já codificada num cliente, com o wlock dele e com prazo
+ * (regras 3 e 4). Devolve 0, ou -1 se este cliente já não pode receber nada.
+ *
+ * Se o envio falhar ou o prazo se esgotar, o cliente é marcado `dead` e
+ * desligado com shutdown():
+ *
+ *   - `dead` faz com que mais ninguém espere por ele: as threads que estavam
+ *     na fila do wlock desistem logo, sem gastar outro prazo cada uma.
+ *   - shutdown() e NÃO close(): o close() é do refcount (roster.h). O
+ *     shutdown() só acorda o recv() da thread dona, que faz a saída normal —
+ *     roster_remove() e o EVENT "x left" para os outros.
+ *   - um envio interrompido pode ter deixado MEIA linha no fio
+ *     (typical-problems.md §1.3). Não há forma de a "desfazer"; é por isso
+ *     que a única saída é fechar e nunca voltar a escrever nesse socket. */
 static int send_line_to(struct client *c, const char *line, size_t len)
 {
+    if (atomic_load(&c->dead))              /* já sabemos que não serve */
+        return -1;
+
     pthread_mutex_lock(&c->wlock);
-    int rc = send_all(c->fd, line, len);
+    /* Re-verificar dentro do lock: podemos ter estado na fila do wlock
+     * enquanto outra thread esgotava o prazo neste mesmo cliente. */
+    int rc = atomic_load(&c->dead) ? -1
+           : send_all_timeout(c->fd, line, len, SEND_TIMEOUT_MS);
+    if (rc != 0 && !atomic_exchange(&c->dead, 1)) {
+        /* Só a primeira thread a falhar chega aqui (atomic_exchange). */
+        if (rc == SEND_TIMEOUT_EXPIRED)
+            printf("[server] %s nao le ha %d ms: a desligar\n",
+                   c->who, SEND_TIMEOUT_MS);
+        shutdown(c->fd, SHUT_RDWR);
+    }
     pthread_mutex_unlock(&c->wlock);
-    return rc;
+    return rc == 0 ? 0 : -1;
 }
 
 /* Entrega uma mensagem ao destino que a session indicou.
  *
  * `from` é quem provocou a mensagem — serve para o SESS_SELF e para excluir o
- * próprio nos SESS_OTHERS. Devolve -1 só quando o envio PARA O PRÓPRIO falha:
- * é o único caso que obriga a fechar esta ligação. Um erro a enviar para outro
- * cliente é problema da thread dele, que o vai descobrir no seu próprio recv(). */
+ * próprio nos SESS_OTHERS. Devolve -1 só quando o envio SESS_SELF falha: é o
+ * único caso que obriga esta thread a parar já.
+ *
+ * Nos broadcasts os erros não são devolvidos, nem quando o próprio está no
+ * retrato (SESS_ALL): quem falhou ficou marcado `dead` e com shutdown() feito
+ * (send_line_to), e a thread DONO desse cliente dá por isso no recv() e trata
+ * da saída. Assim um cliente morto nunca faz parar a thread de outro. */
 static int deliver(struct client *from, const struct sess_out *o)
 {
     char   line[PROTO_LINE_BUF];
@@ -106,8 +151,8 @@ static int deliver(struct client *from, const struct sess_out *o)
     size_t n = roster_snapshot(&R, snap, ROSTER_MAX,
                                o->dest == SESS_OTHERS ? from : NULL);
 
-    /* Envio FORA do lock. Um send() que falhe aqui não é tratado: o peer está
-     * morto e a thread dele vai dar por isso no recv(). */
+    /* Envio FORA do lock (regra 1) e com prazo (regra 4). Um envio que falhe
+     * aqui não é tratado: send_line_to() já desligou esse cliente. */
     for (size_t i = 0; i < n; i++)
         send_line_to(snap[i], line, len);
 
@@ -187,21 +232,30 @@ static void serve(struct client *c, struct session *sess)
 
             size_t nout = session_handle(sess, line, len, outs, SESS_MAX_OUT);
 
-            /* Entrar no chat ANTES de entregar as saídas: a ordem garante que
-             * o EVENT "x joined" já sai com o x na lista — não para ele (vai
-             * com SESS_OTHERS), mas para que um CHAT que chegue no mesmo
-             * instante não o salte. */
-            if (!joined && sess->state == SESS_READY) {
-                roster_join(&R, c, sess->nick);
-                joined = 1;
-            }
-
             for (size_t i = 0; i < nout; i++) {
                 if (outs[i].msg.type == MT_ERROR)
                     printf("[server] %s -> ERROR %d (%s)\n",
                            c->who, outs[i].msg.code, outs[i].msg.reason);
                 if (deliver(c, &outs[i]) != 0)
                     return;                     /* só falha no envio ao próprio */
+
+                /* Entrar no chat DEPOIS de o OK ter seguido (outs[0], SELF) e
+                 * ANTES do EVENT (outs[1], OTHERS) — D9.
+                 *
+                 * Antes do OK não pode ser: entre o roster_join() e o envio do
+                 * OK, um CHAT ou EVENT de outra thread passava à frente, e o
+                 * cliente via outra coisa como resposta ao seu NICK (medido:
+                 * 26 em 2000 ligações com tráfego constante). Como o OK já
+                 * saiu por completo (enviado dentro do wlock), tudo o que
+                 * vier a seguir chega depois dele.
+                 *
+                 * Um CHAT enviado no instante entre o OK e esta linha não
+                 * chega a quem está a entrar — e está certo: ainda não estava
+                 * no chat. */
+                if (!joined && sess->state == SESS_READY) {
+                    roster_join(&R, c, sess->nick);
+                    joined = 1;
+                }
             }
         }
     }
@@ -263,10 +317,20 @@ int main(int argc, char *argv[])
          * O listener continua à escuta. */
         int fd = accept(listener, (struct sockaddr *)&peer, &peer_len);
         if (fd < 0) {
-            if (errno == EINTR)
+            /* Um accept() falhado é quase sempre problema DESSA ligação
+             * (ECONNABORTED: desistiu antes de ser aceite) ou passageiro
+             * (EMFILE/ENFILE: sem fds livres, ENOBUFS/ENOMEM). Nenhum é razão
+             * para deitar abaixo o chat de toda a gente — e sair daqui com
+             * threads vivas tornava o roster_destroy() um use-after-free. */
+            if (errno == EINTR || errno == ECONNABORTED)
                 continue;
             perror("accept");
-            break;
+            if (errno == EMFILE || errno == ENFILE ||
+                errno == ENOBUFS || errno == ENOMEM) {
+                sleep(1);                       /* dar tempo a que saia alguém */
+                continue;
+            }
+            break;                              /* EBADF, EINVAL...: bug nosso */
         }
 
         char who[64];
@@ -274,9 +338,17 @@ int main(int argc, char *argv[])
 
         struct client *c = roster_add(&R, fd, who);
         if (c == NULL) {
-            /* Lista cheia ou sem memória: recusar em condições em vez de
-             * aceitar uma ligação que não conseguimos servir. */
+            /* Lista cheia ou sem memória: recusar em condições, com um ERROR
+             * que o cliente consegue mostrar, em vez de um fecho sem
+             * explicação (PROTOCOL.md §5). Prazo curto: não vale a pena
+             * prender o ciclo do accept() por causa de quem vai ser recusado. */
             fprintf(stderr, "[server] %s recusado: lista cheia\n", who);
+            struct msg e = { .type = MT_ERROR, .code = 503 };
+            snprintf(e.reason, sizeof e.reason, "%s", SRV_R_FULL);
+            char   line[PROTO_LINE_BUF];
+            size_t len;
+            if (proto_encode(&e, line, sizeof line, &len) == 0)
+                send_all_timeout(fd, line, len, 200);
             close(fd);
             continue;
         }
@@ -300,7 +372,9 @@ int main(int argc, char *argv[])
         printf("[server] ligado: %s (%zu cliente(s))\n", who, roster_count(&R));
     }
 
+    /* Só se chega aqui por um bug nosso (accept() com EBADF/EINVAL). Pode
+     * haver threads vivas, por isso NÃO se chama roster_destroy() (seria um
+     * use-after-free, ver roster.h); o encerramento limpo é do M4 (Ctrl+C). */
     close(listener);
-    roster_destroy(&R);
     return EXIT_SUCCESS;
 }

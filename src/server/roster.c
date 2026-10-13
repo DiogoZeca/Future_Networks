@@ -68,6 +68,7 @@ struct client *roster_add(struct roster *r, int fd, const char *who)
     c->fd = fd;
     snprintf(c->who, sizeof c->who, "%s", who);
     c->nick[0] = '\0';              /* vazio até o NICK ser aceite */
+    atomic_init(&c->dead, 0);       /* ninguém lhe escreve antes do add */
 
     if (pthread_mutex_init(&c->wlock, NULL) != 0) {
         free(c);

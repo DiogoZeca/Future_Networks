@@ -45,6 +45,31 @@ python3 scripts/probe_client.py         # portas 5190-5197
 
 ---
 
+## `probe_m2.py`
+
+Verificação do servidor multiutilizador. Arranca o seu próprio `./bin/server`
+(porta 5210), liga clientes a sério e verifica o que **cada um** recebe — e o
+que **não** deve receber. É passa/falha. Demora ~25 s.
+
+```sh
+make
+python3 scripts/probe_m2.py
+```
+
+| § | Cenário | O que prova |
+|---|---|---|
+| 1–5 | três clientes entram, falam, erram e saem; um liga e desliga sem nick | `OK`, broadcast incluindo o emissor, `ERROR` só para quem errou, `EVENT` de entrada e saída |
+| 6 | 1000 entradas enquanto alguém fala sem parar | a 1.ª linha depois do `NICK` é sempre o `OK` |
+| 7 | um cliente entra e nunca lê; ~3 MB de tráfego | é desligado ao fim de 5 s e o chat continua |
+| 8 | 70 ligações para 64 lugares | as que sobram recebem `ERROR 503` |
+
+As secções 6–8 falham contra a primeira versão do M2: cada uma é um bug que
+existiu (`docs/milestones/M2.md`, "Revisão do M2"). O log do servidor vai para
+um ficheiro temporário e não para um pipe — um pipe que ninguém lê enche e
+**para o servidor** (nota 6 do M2.md).
+
+---
+
 ## `probe_m0.py`
 
 Verificação funcional do servidor de echo. Arranca o `./bin/server`, provoca cinco cenários difíceis de reproduzir à mão, mata o servidor e mostra o log dele.

@@ -1,10 +1,11 @@
 # Problemas típicos
 
-Catálogo dos erros que aparecem sempre neste tipo de projeto (com base nos do professor mais alguns encontrados a testar o M0 e o M1).
+Catálogo dos erros que aparecem sempre neste tipo de projeto (com base nos do professor — slide 125 — mais alguns encontrados a testar o M0, o M1 e o M2).
 
-Cada entrada tem um **Estado**. Os resolvidos no M1 estão explicados em detalhe
-(evidência do M0 → solução → prova) em
-[`milestones/M1.md` — "Problemas do M0 resolvidos no M1"](milestones/M1.md#problemas-do-m0-resolvidos-no-m1).
+Cada entrada tem um **Estado**. Os resolvidos estão explicados em detalhe
+(evidência → solução → prova) em
+[`milestones/M1.md` — "Problemas do M0 resolvidos no M1"](milestones/M1.md#problemas-do-m0-resolvidos-no-m1) e
+[`milestones/M2.md` — "Problemas do M1 resolvidos no M2"](milestones/M2.md#problemas-do-m1-resolvidos-no-m2).
 
 ---
 
@@ -37,6 +38,17 @@ Observada em 2026-10-13, com o servidor do M1 compilado com `SAN=1`
 | Linha com `'\0'` embebido | `ERROR 400 "invalid JSON"` |
 | Relatórios do ASan/UBSan | zero |
 
+## 0.2 Evidência medida no M2
+
+Observada em 2026-10-13 (detalhe em `milestones/M2.md`, P12 e P18):
+
+| Experiência | Primeira versão do M2 | Depois da revisão |
+|---|---|---|
+| Um cliente que nunca lê + 3000 mensagens de 1 KB | ao fim de ~2,6 MB **o chat inteiro congela, para sempre** | o lento é desligado ao fim de 5 s; o chat continua |
+| 2000 entradas com um cliente a falar sem parar | **26** viram um `CHAT` antes do `OK` ao seu `NICK` | 0 |
+| O mesmo com ThreadSanitizer (300 entradas) | **61** | 0 |
+| `probe_m2.py` inteiro com ThreadSanitizer | — | zero data races |
+
 ---
 
 ## 1. TCP é um byte stream, não um stream de mensagens
@@ -61,7 +73,7 @@ Observada em 2026-10-13, com o servidor do M1 compilado com `SAN=1`
 - **Porquê:** hoje `send_all()` devolve `-1` em qualquer erro que não seja `EINTR`. Enquanto os sockets forem bloqueantes puros isso é seguro. Quando o M4 puser
 `SO_SNDTIMEO` (ou sockets não bloqueantes), `send()` passa a poder **aceitar parte dos bytes e só depois devolver `EAGAIN`/`EWOULDBLOCK`**. O código atual desiste *depois de já ter enviado meia mensagem* - o stream do peer fica corrompido e não há recuperação possível, porque o `\n` seguinte aparece no sítio errado.
 - **Como evitar:** quando se introduzir o timeout, decidir explicitamente entre (a) tratar `EAGAIN` como erro fatal **e fechar a ligação** (nunca voltar a escrever nela), ou (b) fila de envio por cliente. Nunca devolver erro e continuar a usar o socket.
-- **Estado:** `Parcialmente corrigido` - corrigir **no mesmo commit** em que entrar o timeout (**M4**). Nota: no M1 o cliente já usa `SO_RCVTIMEO` (timeout de **leitura**); esta armadilha é só do timeout de **envio**, que ainda não existe.
+- **Estado:** `Resolvido` - **M2**, no mesmo commit em que entrou o timeout de envio, com a opção (a): `send_all_timeout()` devolve erro se o prazo expirar e `send_line_to()` marca o cliente `dead` e desliga-o com `shutdown()` — **nunca mais se escreve nesse socket**. Prova de que a meia mensagem existe mesmo: `test_net` #57. O cliente continua a usar o `send_all()` sem prazo (só fala com um servidor). Ver M2.md, P13 e nota 9.
 
 ### 1.4 Linha maior que o buffer
 
@@ -100,14 +112,14 @@ desligar?"*. São quatro cenários distintos, com sintomas diferentes.
   - *idle timeout* ao nível da aplicação (`SO_RCVTIMEO`, ou `poll()` com timeout): sem nada recebido em N segundos, assume-se morto e fecha-se; **e/ou**
   - *heartbeat*: `PING`/`PONG` periódico - mais fiável, porque distingue "ligação morta" de "utilizador calado". Como `PING` não está na lista fixa do slide 124, tem de ser negociado com os outros grupos ou implementado de forma compatível (ex.: o servidor usa um `EVENT` inócuo, ou mede só a inatividade).
   - `SO_KEEPALIVE` com `TCP_KEEPIDLE`/`TCP_KEEPINTVL`/`TCP_KEEPCNT` é a alternativa ao nível do kernel; funciona, mas as opções são específicas de Linux.
-- **Estado:** `Por resolver` - **M4** ("idle timeout"). **É o cenário mais provável de ser perguntado na defesa.** Vale a pena saber explicar porque é que é diferente de 2.1 e 2.2.
+- **Estado:** `Parcial` - **M2** / `Por resolver` - **M4** ("idle timeout"). Desde o M2, **se houver tráfego** para esse cliente, o prazo de envio (2.4) apanha-o: os broadcasts acumulam-se, o buffer enche, o envio expira ao fim de 5 s e ele é desligado (com `EVENT "x left"`). **Sem tráfego** continua invisível até ao M4. **É o cenário mais provável de ser perguntado na defesa.** Vale a pena saber explicar porque é que é diferente de 2.1 e 2.2.
 
 ### 2.4 Cliente lento ou parado - não morreu, só não lê
 
 - **Sintoma:** **todos** os outros utilizadores ficam bloqueados. O chat congela.
 - **Porquê:** o servidor faz broadcast com `send()` bloqueante. Se um cliente não lê, a janela TCP dele fecha, o buffer de envio do servidor enche e o `send()` bloqueia - com o lock da lista de clientes na mão, no pior caso. Um único cliente parado (ou um `Ctrl+S` no terminal, ou um portátil suspenso) para o servidor inteiro.
 - **Como evitar:** `SO_SNDTIMEO` + desligar quem estourar o timeout, ou fila de envio por cliente com thread de escrita dedicada. **E nunca fazer `send()` com um mutex global agarrado** (ver 3.2).
-- **Estado:** `Por Resolver` - **M2/M4**. Fácil de demonstrar: basta suspender um cliente com `Ctrl+Z` e ver o resto do chat parar.
+- **Estado:** `Resolvido` - **M2** (D11): prazo **total** de 5 s por envio (`send_all_timeout()`, `poll()` + `MSG_DONTWAIT`); quem o esgota é marcado `dead` e desligado com `shutdown()`, e mais ninguém espera por ele. Provas: `test_net` #54, #55; `probe_m2.py` §7. **Atenção:** *não* é fácil de demonstrar à mão — com `Ctrl+Z` e poucas mensagens os buffers do kernel (centenas de KB a MB) absorvem tudo e não se vê nada. Medimos o congelamento só ao fim de ~2,6 MB (secção 0.2). A primeira versão do M2 enviava fora do lock mas sem prazo, e congelava na mesma — enviar fora do lock **não chega** (ver 3.2). Alternativa não implementada: fila de envio por cliente (M2.md, nota 7).
 
 ---
 
@@ -125,19 +137,28 @@ desligar?"*. São quatro cenários distintos, com sintomas diferentes.
 - **Sintoma:** o chat fica lento ou bloqueia completamente quando um cliente é lento.
 - **Porquê:** combina 2.4 com 3.1 - um `send()` que bloqueia dentro da secção crítica transforma um cliente lento num deadlock global.
 - **Como evitar:** o lock protege a *estrutura de dados*, nunca a *E/S*. Copiar e sair.
-- **Estado:** `Resolvido` - **M2**: `deliver()` envia fora do lock; o lock do roster nunca e segurado durante um `send()`.
+- **Estado:** `Resolvido` - **M2**: `deliver()` envia fora do lock; o lock do roster nunca e segurado durante um `send()`. **Mas isto sozinho não resolve o 2.4:** o lock do roster fica livre, só que a thread que envia para o cliente lento continua presa (e com o `wlock` dele), e num broadcast todas as threads lhe escrevem. É preciso também o prazo de envio (2.4).
 
 ### 3.3 Mensagens de vários emissores intercaladas no mesmo socket
 
 - **Sintoma:** o cliente recebe JSON corrompido: metade de uma mensagem, metade de outra.
 - **Porquê:** duas threads a fazer `send_all()` no mesmo fd ao mesmo tempo. Cada `send()` é atómico, mas o ciclo do `send_all()` não é.
 - **Como evitar:** um mutex de escrita **por cliente** (já previsto no `M2.md`).
-- **Estado:** `Resolvido` - **M2**: `wlock` por cliente em `send_line_to()`. **Nota honesta:** nao esta *demonstrado* - o TSan nao ve esta corrida (e logica, no socket, nao de memoria) e com `SO_SNDBUF` de 16 KB e linhas de 4 KB o `send_all()` quase nunca faz mais de uma iteracao. E protecao para o buffer cheio (cliente que nao le), cenario de M4. Use-after-free na saída de um cliente
+- **Estado:** `Resolvido` - **M2**: `wlock` por cliente em `send_line_to()`. **Nota honesta:** nao esta *demonstrado* - o TSan nao ve esta corrida (e logica, no socket, nao de memoria) e com `SO_SNDBUF` de 16 KB e linhas de 4 KB o `send_all()` quase nunca faz mais de uma iteracao. E protecao para o buffer cheio (cliente que nao le), que desde a revisao do M2 tambem tem prazo (2.4).
+
+### 3.4 Use-after-free na saída de um cliente
 
 - **Sintoma:** crash ou corrupção quando alguém sai durante um broadcast.
 - **Porquê:** a thread do cliente liberta a sua estrutura enquanto outra ainda a tem na cópia da lista.
 - **Como evitar:** contagem de referências, ou remover da lista e só libertar depois de garantir que mais ninguém tem a referência. Em C isto é trabalho a sério - decidir a estratégia **antes** de escrever o M2, não durante.
-- **Estado:** `Resolvido` - **M2**: contagem de referencias no `roster` (`roster_snapshot` incrementa dentro do lock, `client_release` larga). Teste #4 e #12 com ASan; servidor sob ThreadSanitizer com 10 clientes: zero races.
+- **Estado:** `Resolvido` - **M2**: contagem de referencias no `roster` (`roster_snapshot` incrementa dentro do lock, `client_release` larga). Teste #4 e #12 com ASan; servidor sob ThreadSanitizer com o `probe_m2.py` completo: zero races. Quando é outra thread a detetar que um cliente morreu, faz `shutdown()` e **não** `close()` — o `close()` é sempre do refcount (M2.md, nota 10).
+
+### 3.5 A resposta a um pedido ultrapassada por um broadcast
+
+- **Sintoma:** um cliente envia `NICK` e a primeira linha que recebe é um `CHAT` de outra pessoa, não o `OK`. Raro (~1%), só com tráfego, e só aparece com muitas ligações.
+- **Porquê:** o cliente entrava na lista do chat (`roster_join()`) **antes** de o `OK` ser enviado. Nessa janela, a thread de outro cliente tirava um retrato que já o incluía e enviava-lhe o `CHAT` primeiro. Os dois envios são serializados pelo `wlock`, mas por ordem de chegada, não pela ordem "lógica".
+- **Como evitar:** quando a ordem importa, só tornar o cliente visível aos outros **depois** de lhe ter enviado a resposta. E, do lado do cliente, não assumir que a primeira linha é a resposta: esperar pelo tipo certo.
+- **Estado:** `Resolvido` - **M2** (revisão, D9): `roster_join()` depois do `OK`; o cliente espera por `OK`/`ERROR`. Prova: `probe_m2.py` §6 (1000 entradas, 0 falhas; antes 26/2000). O ThreadSanitizer **não** o apanha: não é uma data race.
 
 ---
 
@@ -220,7 +241,7 @@ Relevante porque os outros grupos não usam todos Linux.
 |---|---|---|
 | Fugas do cJSON | Cada `cJSON_Parse()` precisa de `cJSON_Delete()`; cada `cJSON_PrintUnformatted()` devolve memória que é preciso libertar | `Resolvido` - **M1**: uma única saída por função; mutações apanhadas pelo LeakSanitizer (M1.md, P9) |
 | Fuga de descritores | Falhar um `close(fd)` num caminho de erro esgota o limite de fds; o servidor deixa de aceitar ligações ao fim de ~1024 | `Parcial Resolvido` - rever cada `goto`/`break` |
-| Buffer na stack por thread | Com N clientes, N × buffer. Escolher tamanhos conscientemente | `por Resolver` - **M2** |
+| Buffer na stack por thread | Com N clientes, N × buffer. Escolher tamanhos conscientemente | `Resolvido` - **M2**: ~23 KB por thread do servidor (`rxbuf` 8 KB + `chunk` 4 KB + `line` 4 KB + saídas 2,5 KB + linha codificada 4 KB + retrato 0,5 KB), dentro de uma stack de 8 MB; com o máximo de 64 clientes, ~1,5 MB. Sem `malloc` por mensagem |
 | Strings sem terminador | `recv()` **não** põe `\0`. Nunca passar o buffer a `printf("%s")` sem limitar o tamanho | `Resolvido` - **M1**: comprimento sempre explícito (`out_len`), linhas com `'\0'` recusadas, `%.*s` nos logs (M1.md, P6) |
 
 **Ferramenta:** `make SAN=1` (ASan + UBSan) já está no Makefile. Usar **sempre** que se testa concorrência, não só quando algo rebenta.
@@ -236,6 +257,8 @@ Relevante porque os outros grupos não usam todos Linux.
 | O emissor de `MSG` recebe o próprio `CHAT`? | Se um grupo decide que sim e outro que não, as mensagens aparecem duplicadas ou em falta - e parece um bug de rede. **Proposta nossa (D5): sim** - `PROTOCOL.md` v0.2, por acordar |
 | `OK` a todos os pedidos ou só a alguns? | Um cliente que espere `OK` bloqueia contra um servidor que não o envia. **Proposta nossa (D6): `OK` ao `NICK`**; o nosso cliente tem timeout de 5 s para não bloquear contra quem decidir diferente |
 | Campos desconhecidos | A spec já diz: **ignorar**. Isto permite extensões sem partir ninguém |
+| A 1.ª linha depois do `NICK` é a resposta? | No nosso servidor **sim**, garantido (3.5). Mas o nosso cliente não o assume: espera por `OK`/`ERROR` e mostra o que vier antes, para aguentar servidores que mandem boas-vindas ou um `EVENT` primeiro |
+| Servidor cheio | **Proposta nossa (D12):** `ERROR 503 "server full"` e fecho, em vez de um fecho sem explicação |
 | Nicks com maiúsculas/acentos/espaços | **Proposta nossa (D4):** 1–32 bytes, sem espaços nem caracteres de controlo, UTF-8 aceite sem validar; case-sensitive ainda por decidir (importa no M3, nicks únicos) |
 | Testar só contra nós próprios | Os cenários em `tests/interop/` são texto puro e correm contra qualquer servidor com `scripts/interop.py` (3 modos de envio). `scripts/probe_client.py` mostra como o nosso cliente reage a servidores que decidiram diferente |
 
@@ -248,7 +271,7 @@ Relevante porque os outros grupos não usam todos Linux.
 - [ ] `make` sem avisos
 - [ ] `make SAN=1` e correr os testes - sem relatórios do ASan/UBSan
 - [ ] Matar um cliente com `kill -9` → servidor sobrevive e remove-o
-- [ ] Suspender um cliente com `Ctrl+Z` → os outros continuam a falar (M2+)
+- [ ] Suspender um cliente com `Ctrl+Z` → os outros continuam a falar (M2+); para encher mesmo os buffers, `probe_m2.py` §7
 - [ ] `Ctrl+C` no servidor → fecha os sockets, sem "address already in use" a seguir
 - [ ] Enviar lixo (`echo "nao e json" | nc host porta`) → `ERROR`, não crash
 - [ ] Enviar uma linha de 1 MB sem `\n` → `ERROR`, não overflow

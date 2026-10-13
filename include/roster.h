@@ -23,6 +23,14 @@
  * fechado e a memória só é libertada quando `refs` chega a zero. A janela
  * deixa de existir.
  *
+ * O QUE O REFCOUNT NÃO RESOLVE
+ * ----------------------------
+ * Enviar fora do lock impede que um cliente lento bloqueie o ROSTER (entradas,
+ * saídas, retratos). Não impede que bloqueie quem lhe ESCREVE: a thread que
+ * está no send() para ele fica presa, e as outras ficam na fila do wlock dele.
+ * Num chat com broadcast isso é toda a gente. Isso resolve-se no envio, não
+ * aqui: prazo em cada envio e `dead` (src/server/main.c, regra 4).
+ *
  *
  * QUEM PROTEGE O QUÊ
  * ------------------
@@ -33,6 +41,9 @@
  *                 send_all() não é, e duas threads a escrever ao mesmo tempo
  *                 no mesmo fd intercalam metade de uma mensagem com metade de
  *                 outra (§3.3). O cliente receberia JSON corrompido.
+ *   _Atomic       `dead`: posto a 1 pela primeira thread cujo envio falhe ou
+ *                 expire. Atómico e não protegido por lock porque é lido por
+ *                 todas as threads antes de esperarem pelo wlock.
  *   ninguém       fd e who: escritos uma vez no roster_add() e só lidos depois.
  *                 O broadcast lê o `fd` de outros, o que é seguro porque não
  *                 muda durante a vida do cliente e o refcount garante que não
@@ -59,6 +70,7 @@
 #define ROSTER_H
 
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stddef.h>
 
 #include "protocol.h"
@@ -75,6 +87,10 @@ struct client {
 
     /* --- serializa as escritas neste socket --- */
     pthread_mutex_t wlock;
+
+    /* --- 1 = um envio falhou ou expirou: não voltar a tentar. Atómico
+     *     porque é lido por todas as threads que fazem broadcast. --- */
+    _Atomic int dead;
 
     /* --- protegidos por roster.lock --- */
     char nick[PROTO_NICK_MAX + 1];    /* "" até o NICK ser aceite             */
@@ -127,6 +143,11 @@ void roster_remove(struct roster *r, struct client *c);
  * de outra pessoa. O nosso cliente aguenta; um de outro grupo que espere o OK
  * como primeira resposta parte-se — e é precisamente o tipo de divergência que
  * só aparece no dia da interoperabilidade.
+ *
+ * A ORDEM conta: o servidor chama isto DEPOIS de o OK ter sido enviado, não
+ * antes. Chamado antes, abria-se uma janela em que um broadcast de outra
+ * thread chegava ao cliente antes do OK (ver o ciclo de saídas em
+ * src/server/main.c).
  *
  * Idempotente. */
 void roster_join(struct roster *r, struct client *c, const char *nick);

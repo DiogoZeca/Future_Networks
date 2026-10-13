@@ -24,21 +24,22 @@ Notas de cada fase em [`docs/milestones/`](docs/milestones/).
 ## Estrutura
 
 ```
-include/         headers (net.h, framing.h, protocol.h, session.h, ui.h)
+include/         headers (net.h, framing.h, protocol.h, session.h, roster.h, ui.h)
 src/common/      código usado por cliente e servidor
-  net.c            sockets: criar, ligar, send_all
+  net.c            sockets: criar, ligar, send_all, send_all_timeout (prazo total)
   framing.c        bytes <-> linhas (buffer de receção, split em '\n')
   protocol.c       linhas <-> mensagens JSON validadas
 src/server/      servidor
   session.c        máquina de estados por ligação (testada à unidade)
-  main.c           sockets à volta das camadas
+  roster.c         lista de clientes partilhada: lock + contagem de referências
+  main.c           uma thread por cliente; broadcast com prazo de envio
 src/client/      cliente
   ui.c             texto <-> mensagens (testada à unidade)
-  main.c           pedido-resposta sobre o socket
-tests/unit/      testes framing / protocol / session / ui (make test)
+  main.c           duas threads: teclado -> socket e socket -> ecrã
+tests/unit/      testes framing / net / protocol / roster / session / ui (make test)
 tests/interop/   cenários em texto, independentes da linguagem
 docs/            especificação do protocolo e notas por fase
-scripts/         utilitários (correr cenários de interop, etc.)
+scripts/         utilitários (interop contra qualquer servidor, sondas por fase)
 ```
 
 ## Compilar e correr
@@ -56,3 +57,7 @@ make test       # testes unitários (make test SAN=1 com sanitizers)
 
 Teste rápido sem o nosso cliente: `nc <ip> 5000` e escrever JSON à mão.
 Contra qualquer servidor: `python3 scripts/interop.py <ip> 5000`.
+Vários clientes a sério contra o nosso servidor: `python3 scripts/probe_m2.py`.
+
+Cada fase tem em `docs/milestones/` uma tabela "O que os slides pedem" com a
+resposta a cada ponto dos slides 123–125, onde está no código e como se prova.

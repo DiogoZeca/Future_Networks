@@ -193,9 +193,14 @@ static int ask_nick(char *nick, size_t cap)
 /* Envia o NICK e espera a resposta, AINDA em pedido-resposta.
  *
  * Esta fase fica síncrona de propósito: só vale a pena arrancar o chat depois
- * de sermos aceites, e enquanto ela dura mais ninguém toca no rxbuf. O servidor
- * garante que o OK vai à frente do EVENT (session.h), por isso a primeira
- * linha é mesmo a resposta ao nosso NICK.
+ * de sermos aceites, e enquanto ela dura mais ninguém toca no rxbuf.
+ *
+ * O NOSSO servidor garante que a primeira linha é a resposta ao NICK
+ * (PROTOCOL.md §4). Mas não se assume isso: só um OK é aceitação e só um
+ * ERROR é recusa. Tudo o resto (um EVENT, umas boas-vindas de um servidor de
+ * outro grupo) é mostrado e continua-se à espera. Antes, qualquer coisa que
+ * não fosse ERROR contava como OK, e essa linha desaparecia sem ser mostrada.
+ * Cada leitura tem o timeout de REPLY_TIMEOUT_S.
  *
  * Devolve 0 se fomos aceites. */
 static int do_nick(int fd, const struct msg *nick)
@@ -207,30 +212,26 @@ static int do_nick(int fd, const struct msg *nick)
     if (send_msg(fd, nick) != 0)
         return -1;
 
-    int r = read_line(fd, line, &len);
-    if (r == 0) {
-        fprintf(stderr, "[client] sem resposta do servidor em %d s\n", REPLY_TIMEOUT_S);
-        return -1;
-    }
-    if (r != 1) {
-        fprintf(stderr, "[client] o servidor fechou a ligacao\n");
-        return -1;
-    }
+    /* Esperar pela resposta ao NICK: OK ou ERROR. Um servidor de outro grupo
+     * pode mandar outras coisas antes (um EVENT, uma mensagem de boas-vindas):
+     * mostrá-las e continuar à espera, em vez de as tomar por um OK. */
+    for (;;) {
+        int r = read_line(fd, line, &len);
+        if (r == 0) {
+            fprintf(stderr, "[client] sem resposta do servidor em %d s\n", REPLY_TIMEOUT_S);
+            return -1;
+        }
+        if (r != 1) {
+            fprintf(stderr, "[client] o servidor fechou a ligacao\n");
+            return -1;
+        }
 
-    memset(&reply, 0, sizeof reply);
-    struct proto_err err;
-    if (proto_parse(line, len, &reply, &err) != 0) {
-        printf("[servidor mandou mensagem nao suportada (%s)] %.*s\n",
-               err.reason, (int)len, line);
-        return -1;
+        show_line(line, len, &reply);       /* mostra e faz o parse */
+        if (reply.type == MT_OK)
+            return 0;
+        if (reply.type == MT_ERROR)         /* nick recusado: não continuar */
+            return -1;
     }
-    if (reply.type == MT_ERROR) {           /* nick recusado: não continuar */
-        char text[PROTO_LINE_BUF];
-        ui_format(&reply, text, sizeof text);
-        printf("%s\n", text);
-        return -1;
-    }
-    return 0;
 }
 
 int main(int argc, char *argv[])

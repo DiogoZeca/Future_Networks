@@ -1,9 +1,9 @@
-# Chat Protocol — v0.3 (draft)
+# Chat Protocol — v0.4 (draft)
 
 Shared specification for interoperability between groups (IF 2026/27).
 Message names and fields come from the course slides (slide 124) and are
 **fixed**. Everything marked **PROPOSAL** is our group's position, already
-implemented in our M1 server and client, but **not yet agreed** with the other
+implemented in our server and client, but **not yet agreed** with the other
 groups — it is open for discussion and will be revised after the interop tests.
 
 Conformance scenarios: [`tests/interop/`](../tests/interop/) — plain text, run
@@ -48,9 +48,9 @@ against any server with `python3 scripts/interop.py <host> <port>`.
 | S → C     | `EVENT` | `{"type":"EVENT","text":"rui joined"}`                         | Join and leave notices               |
 | S → C     | `ERROR` | `{"type":"ERROR","code":409,"reason":"nick taken"}`            | Request refused                      |
 
-Our M1 implements `NICK`, `MSG`, `OK`, `CHAT`, `ERROR`. `PRIV`, `LIST`, `QUIT`,
-`EVENT` is implemented since M2. `USERS` arrives in M3; until then our server answers it with
-`ERROR 400 "unknown type"`.
+Implemented: `NICK`, `MSG`, `OK`, `CHAT`, `ERROR` (since M1) and `EVENT` (since M2).
+`PRIV`, `LIST`, `QUIT` and `USERS` arrive in M3; until then our server answers
+any of them with `ERROR 400 "unknown type"`.
 
 General rules:
 - Receivers MUST ignore unknown fields (allows optional extensions).
@@ -94,9 +94,11 @@ General rules:
 | What does the sender of `PRIV` receive? | Open (M3). |
 | Exact `EVENT` text for join/leave | `"<nick> joined"` and `"<nick> left"` (the slide 124 example is `"rui joined"`). Clients should display `EVENT` as a notice, not as a chat line. |
 | Who receives an `EVENT`? | Everyone **except** the client it is about: whoever joins does not need to be told they joined. |
-| Does a client receive traffic before its `NICK` is accepted? | **No.** Between `accept()` and a successful `NICK` the connection exists but is not in the chat, so it gets no `CHAT` and no `EVENT`. The first line a client sees is always the answer to its own `NICK`. |
+| Does a client receive traffic before its `NICK` is accepted? | **No.** Between `accept()` and a successful `NICK` the connection exists but is not in the chat, so it gets no `CHAT` and no `EVENT`. The first line a client sees is always the answer to its own `NICK` (`OK` or `ERROR`): the client only joins the chat *after* its `OK` has been sent. Clients should still not rely on this when talking to other servers — wait for `OK`/`ERROR` and display anything that arrives before it. |
 | Does leaving before a successful `NICK` produce an `EVENT`? | **No.** Nobody knew that client was there. |
 | Does `QUIT` get an `OK` before the server closes? | Open (M3). |
+| What if a client stops reading (suspended laptop, `Ctrl+Z`)? | Each message the server sends must be fully accepted within **5 s**. If not, that client is disconnected (the others get `"<nick> left"`). One stuck client must never freeze the chat for everyone (slide 125). A client that is only *slow* is not affected: the kernel buffers hold hundreds of KB. |
+| Server full | `ERROR 503 "server full"`, then the server closes the connection. Our server accepts up to 64 clients. |
 
 Rule of thumb: **strict when sending, tolerant when receiving.** A receiver never
 crashes because of what a peer sent; a server answers with `ERROR` and carries on.
@@ -114,6 +116,7 @@ crashes because of what a peer sent; a server answers with `ERROR` and carries o
 | 401 | `nick required` | request before a successful `NICK` | PROPOSAL |
 | 404 | — | `PRIV` to an unknown nick | PROPOSAL (M3) |
 | 409 | `nick taken` | `NICK` already in use | **from the slides** (M3) |
+| 503 | `server full` | no room for another client; the server closes after sending it | PROPOSAL (M2) |
 
 Clients should rely on the **code**; the reason is human-readable text and may
 differ between implementations (our conformance scenarios compare codes only).
@@ -166,6 +169,10 @@ Line too long — the server closes after the error:
 
 ## Changelog
 
+- v0.4 — M2 review: the first line after `NICK` is now guaranteed to be its
+  answer (the client joins the chat only after the `OK`); a client that does not
+  read for 5 s is disconnected; `ERROR 503 "server full"`; fixed the list of
+  implemented types (§3).
 - v0.3 — M2: `EVENT` implemented (join/leave text, who receives it); a
   connection only joins the chat after a successful `NICK`; `EVENT` added to
   the S→C types a client may not send.

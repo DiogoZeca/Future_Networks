@@ -3,8 +3,10 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <netdb.h>
+#include <poll.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 int tcp_listen(const char *port, int backlog)
@@ -88,6 +90,59 @@ int send_all(int fd, const void *buf, size_t len)
         }
         p   += n;
         len -= (size_t)n;
+    }
+    return 0;
+}
+
+/* Milissegundos que faltam até `deadline` (CLOCK_MONOTONIC: não anda para
+ * trás se alguém mudar a hora do sistema). <= 0 quer dizer "passou". */
+static long ms_left(const struct timespec *deadline)
+{
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (long)(deadline->tv_sec - now.tv_sec) * 1000
+         + (deadline->tv_nsec - now.tv_nsec) / 1000000;
+}
+
+int send_all_timeout(int fd, const void *buf, size_t len, int timeout_ms)
+{
+    struct timespec deadline;
+    clock_gettime(CLOCK_MONOTONIC, &deadline);
+    deadline.tv_sec  += timeout_ms / 1000;
+    deadline.tv_nsec += (long)(timeout_ms % 1000) * 1000000;
+    if (deadline.tv_nsec >= 1000000000L) {
+        deadline.tv_sec++;
+        deadline.tv_nsec -= 1000000000L;
+    }
+
+    const char *p = buf;
+    while (len > 0) {
+        /* MSG_DONTWAIT: este send() nunca bloqueia, mesmo num socket
+         * bloqueante. Se o buffer de envio estiver cheio devolve EAGAIN, e
+         * a espera é feita no poll(), que sabe quanto tempo falta. */
+        ssize_t n = send(fd, p, len, MSG_NOSIGNAL | MSG_DONTWAIT);
+        if (n > 0) {
+            p   += n;
+            len -= (size_t)n;
+            continue;
+        }
+        if (n < 0 && errno == EINTR)
+            continue;
+        if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK)
+            return -1;                         /* o peer morreu */
+
+        /* Buffer cheio: esperar que haja espaço, mas só até ao prazo. */
+        long left = ms_left(&deadline);
+        if (left <= 0)
+            return SEND_TIMEOUT_EXPIRED;
+        struct pollfd pfd = { .fd = fd, .events = POLLOUT };
+        int r = poll(&pfd, 1, (int)left);
+        if (r < 0 && errno != EINTR)
+            return -1;
+        if (r == 0)
+            return SEND_TIMEOUT_EXPIRED;
+        /* r > 0 (há espaço, ou erro/HUP que o próximo send() reporta) ou
+         * EINTR: voltar ao send(). */
     }
     return 0;
 }
