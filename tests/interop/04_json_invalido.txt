@@ -1,0 +1,5 @@
+# Linha que nao e JSON -> ERROR 400, sem fechar a ligacao
+> nao e json
+< {"type":"ERROR","code":400}
+> {"type":"NICK","nick":"ana"}
+< {"type":"OK"}

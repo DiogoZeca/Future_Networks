@@ -1,0 +1,3 @@
+# NICK como primeira mensagem -> OK (D6)
+> {"type":"NICK","nick":"ana"}
+< {"type":"OK"}

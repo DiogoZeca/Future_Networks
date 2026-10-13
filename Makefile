@@ -22,6 +22,10 @@ TEST_SRC := $(wildcard tests/unit/test_*.c)
 TEST_OBJ := $(patsubst tests/unit/%.c,$(BUILD)/tests/%.o,$(TEST_SRC))
 TEST_BIN := $(patsubst tests/unit/%.c,$(BIN)/tests/%,$(TEST_SRC))
 
+# Objetos do servidor SEM o main.o: a lógica do servidor (session.c) é testada
+# à unidade, e o binário de teste já tem o seu próprio main().
+SERVER_LIB_OBJ := $(filter-out $(BUILD)/server/main.o,$(SERVER_OBJ))
+
 ALL_OBJ := $(COMMON_OBJ) $(SERVER_OBJ) $(CLIENT_OBJ) $(TEST_OBJ)
 
 .PHONY: all clean test
@@ -46,7 +50,7 @@ $(BUILD)/tests/%.o: tests/unit/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -Itests/unit -c $< -o $@
 
-$(BIN)/tests/%: $(BUILD)/tests/%.o $(COMMON_OBJ)
+$(BIN)/tests/%: $(BUILD)/tests/%.o $(COMMON_OBJ) $(SERVER_LIB_OBJ)
 	@mkdir -p $(dir $@)
 	$(CC) $(LDFLAGS) $^ -o $@ $(LDLIBS)
 

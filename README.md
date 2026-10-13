@@ -24,14 +24,16 @@ Notas de cada fase em [`docs/milestones/`](docs/milestones/).
 ## Estrutura
 
 ```
-include/         headers partilhados (net.h, framing.h, protocol.h)
+include/         headers (net.h, framing.h, protocol.h, session.h)
 src/common/      código usado por cliente e servidor
   net.c            sockets: criar, ligar, send_all
   framing.c        bytes <-> linhas (buffer de receção, split em '\n')
   protocol.c       linhas <-> mensagens JSON validadas
-src/server/      main do servidor
+src/server/      servidor
+  session.c        máquina de estados por ligação (testada à unidade)
+  main.c           sockets à volta das camadas
 src/client/      main do cliente
-tests/unit/      testes das camadas framing/protocol
+tests/unit/      testes framing / protocol / session (make test)
 tests/interop/   cenários em texto, independentes da linguagem
 docs/            especificação do protocolo e notas por fase
 scripts/         utilitários (correr cenários de interop, etc.)

@@ -1,0 +1,6 @@
+# UTF-8 e escapes JSON. No modo byte-a-byte os caracteres multibyte
+# (e, a com acento) chegam PARTIDOS entre recv() - decisao D3.
+> {"type":"NICK","nick":"zé"}
+< {"type":"OK"}
+> {"type":"MSG","text":"diz \"olá\" \\ adeus"}
+< {"type":"CHAT","from":"zé","text":"diz \"olá\" \\ adeus"}

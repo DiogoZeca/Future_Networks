@@ -1,0 +1,6 @@
+# Campos desconhecidos sao ignorados (PROTOCOL.md §3).
+# O "from" mandado pelo cliente nao conta: o CHAT vem com o nick da sessao.
+> {"type":"NICK","nick":"ana","versao":2}
+< {"type":"OK"}
+> {"type":"MSG","text":"oi","from":"rui","zz":[1,2]}
+< {"type":"CHAT","from":"ana","text":"oi"}

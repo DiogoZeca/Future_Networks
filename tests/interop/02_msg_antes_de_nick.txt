@@ -1,0 +1,5 @@
+# Pedido antes do NICK -> ERROR 401 (proposta); a ligacao continua aberta
+> {"type":"MSG","text":"cedo demais"}
+< {"type":"ERROR","code":401}
+> {"type":"NICK","nick":"ana"}
+< {"type":"OK"}

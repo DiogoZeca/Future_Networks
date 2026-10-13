@@ -5,6 +5,31 @@ ver o que o código faz.
 
 ---
 
+## `interop.py`
+
+Corre os cenários de `tests/interop/*.txt` contra **qualquer** servidor — o
+nosso ou o de outro grupo, em qualquer linguagem. Só usa a biblioteca padrão.
+
+```sh
+make && ./bin/server 5000 &                  # ou o servidor de outro grupo
+python3 scripts/interop.py 127.0.0.1 5000    # todos os cenários
+python3 scripts/interop.py <host> 5000 tests/interop/03_msg_chat.txt
+```
+
+Cada cenário corre em **três modos de envio**, porque é isso que o M1 tem de
+aguentar (slide 125):
+
+| Modo | Como envia | O que prova no servidor |
+|---|---|---|
+| `linha` | um `send()` por linha | o caso fácil |
+| `colado` | as linhas `>` seguidas num só `send()` | mensagens coladas num `recv()` |
+| `byte-a-byte` | um `send()` por byte, com `TCP_NODELAY` | mensagens partidas em muitos `recv()` |
+
+Ao contrário do `probe_m0.py`, este é passa/falha: devolve `0` se tudo passou.
+Resultado atual contra o nosso servidor: **18 ok, 0 falhas**.
+
+---
+
 ## `probe_m0.py`
 
 Verificação funcional do servidor de echo. Arranca o `./bin/server`, provoca cinco cenários difíceis de reproduzir à mão, mata o servidor e mostra o log dele.
