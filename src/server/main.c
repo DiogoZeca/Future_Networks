@@ -62,7 +62,7 @@ static void serve(int fd, const char *who)
     static char         chunk[RX_CHUNK];
     static char         line[RX_LINE_BUF];
     struct session      sess;
-    struct msg          reply;
+    struct sess_out     outs[SESS_MAX_OUT];
 
     rxbuf_init(&rx);
     session_init(&sess);
@@ -111,9 +111,19 @@ static void serve(int fd, const char *who)
                 return;
             }
 
-            session_handle(&sess, line, len, &reply);
-            if (send_reply(fd, who, &reply) != 0)
-                return;
+            size_t nout = session_handle(&sess, line, len, outs, SESS_MAX_OUT);
+            for (size_t i = 0; i < nout; i++) {
+                /* M2 em curso: o roster ainda não está ligado, por isso não há
+                 * "outros" para quem enviar. SESS_SELF e SESS_ALL vão os dois
+                 * para esta ligação (é a única), e os SESS_OTHERS — os EVENT
+                 * de entrada e saída — não vão a lado nenhum. Quando o
+                 * broadcast entrar, é este bloco que passa a consultar o
+                 * roster; o resto do ficheiro não muda. */
+                if (outs[i].dest == SESS_OTHERS)
+                    continue;
+                if (send_reply(fd, who, &outs[i].msg) != 0)
+                    return;
+            }
         }
     }
 }

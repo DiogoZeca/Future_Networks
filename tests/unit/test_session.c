@@ -1,27 +1,43 @@
 /*
  * test_session.c — testes da máquina de estados do servidor.
  *
- * Linhas entram, respostas saem — sem rede. Cada resposta é também passada
- * pelo proto_encode() e comparada BYTE A BYTE com o que tem de ir para o fio:
- * é o mais perto que um teste unitário chega de uma sessão real.
+ * Linhas entram, saídas saem — sem rede, sem roster. Cada saída é também
+ * passada pelo proto_encode() e comparada BYTE A BYTE com o que tem de ir para
+ * o fio: é o mais perto que um teste unitário chega de uma sessão real.
  *
  * Numeração: o 17 vem da tabela em docs/milestones/M1.md; 33-39 acrescentados
- * com a máquina de estados.
+ * com a máquina de estados (M1); 48-52 com os destinos e os EVENT (M2).
  */
 #include "session.h"
 #include "test_util.h"
 
-static struct session s;
-static struct msg     r;
-static char           wire[PROTO_LINE_BUF];
+static struct session  s;
+static struct sess_out outs[SESS_MAX_OUT];
+static size_t          n_outs;
+static char            wire[PROTO_LINE_BUF];
 
-/* Trata uma linha e devolve a resposta tal como iria para o fio (com '\n').
- * Se o encode falhar, devolve "<ENCODE FALHOU>" — o que faz o CHECK_STR do
- * chamador falhar com uma mensagem legível. */
+/* Trata uma linha e devolve a PRIMEIRA saída tal como iria para o fio (com
+ * '\n'). O número de saídas fica em n_outs e os destinos em outs[i].dest, para
+ * os casos que os verificam.
+ *
+ * Devolve "<SEM SAIDAS>" ou "<ENCODE FALHOU>" em vez de rebentar: um teste tem
+ * de falhar com um relatório, nunca com um segfault. */
 static const char *send_line(const char *line)
 {
-    session_handle(&s, line, strlen(line), &r);
-    if (proto_encode(&r, wire, sizeof wire, NULL) != 0)
+    n_outs = session_handle(&s, line, strlen(line), outs, SESS_MAX_OUT);
+    if (n_outs == 0)
+        return "<SEM SAIDAS>";
+    if (proto_encode(&outs[0].msg, wire, sizeof wire, NULL) != 0)
+        return "<ENCODE FALHOU>";
+    return wire;
+}
+
+/* A saída `i` codificada, para os casos que olham para a segunda. */
+static const char *wire_of(size_t i)
+{
+    if (i >= n_outs)
+        return "<NAO EXISTE>";
+    if (proto_encode(&outs[i].msg, wire, sizeof wire, NULL) != 0)
         return "<ENCODE FALHOU>";
     return wire;
 }
@@ -54,7 +70,7 @@ static void caso_33_nick_ok(void)
     CHECK_STR(s.nick, "ana");
 }
 
-/* 34. MSG em READY -> CHAT ao proprio emissor (D5), com o nick DA SESSAO. */
+/* 34. MSG em READY -> CHAT com o nick DA SESSAO. */
 static void caso_34_msg_vira_chat(void)
 {
     CASE(34, "MSG -> CHAT com from = nick da sessao");
@@ -98,6 +114,9 @@ static void caso_36_segundo_nick(void)
     CHECK_STR(send_line("{\"type\":\"NICK\",\"nick\":\"rui\"}"),
               "{\"type\":\"ERROR\",\"code\":400,\"reason\":\"nick already set\"}\n");
     CHECK_STR(s.nick, "ana");
+
+    CASE(36, "e nao gera EVENT nenhum");
+    CHECK_INT(n_outs, 1);
 }
 
 /* 37. Tipos S->C vindos de um cliente -> 400, nos DOIS estados (nao 401). */
@@ -105,11 +124,12 @@ static void caso_37_tipos_do_servidor(void)
 {
     const char *esperado = "{\"type\":\"ERROR\",\"code\":400,\"reason\":\"unexpected type\"}\n";
 
-    CASE(37, "OK / CHAT / ERROR antes do NICK -> 400 (nao 401)");
+    CASE(37, "OK / CHAT / ERROR / EVENT antes do NICK -> 400 (nao 401)");
     session_init(&s);
     CHECK_STR(send_line("{\"type\":\"OK\"}"), esperado);
     CHECK_STR(send_line("{\"type\":\"CHAT\",\"from\":\"x\",\"text\":\"y\"}"), esperado);
     CHECK_STR(send_line("{\"type\":\"ERROR\",\"code\":500}"), esperado);
+    CHECK_STR(send_line("{\"type\":\"EVENT\",\"text\":\"x joined\"}"), esperado);
     CHECK_INT(s.state, SESS_AWAITING_NICK);
 
     CASE(37, "e depois do NICK tambem");
@@ -146,6 +166,110 @@ static void caso_39_sessao_completa(void)
               "{\"type\":\"CHAT\",\"from\":\"ana\",\"text\":\"diz \\\"oi\\\"\",\"private\":false}\n");
 }
 
+/* ---- M2: destinos e EVENT ----------------------------------------------- */
+
+/* 48. Um NICK aceite produz DUAS saidas, com destinos diferentes.
+ *
+ *     A ordem importa: o OK vai primeiro, para que quem entra saiba que foi
+ *     aceite antes de comecar a receber trafego dos outros. */
+static void caso_48_nick_gera_ok_e_event(void)
+{
+    CASE(48, "NICK -> 2 saidas");
+    session_init(&s);
+    CHECK_STR(send_line("{\"type\":\"NICK\",\"nick\":\"ana\"}"), OK_LINE);
+    CHECK_INT(n_outs, 2);
+
+    CASE(48, "a 1.a e o OK, so para quem entrou");
+    CHECK_INT(outs[0].dest, SESS_SELF);
+    CHECK_INT(outs[0].msg.type, MT_OK);
+
+    CASE(48, "a 2.a e o EVENT, para os OUTROS (quem entra nao precisa de aviso)");
+    CHECK_INT(outs[1].dest, SESS_OTHERS);
+    CHECK_INT(outs[1].msg.type, MT_EVENT);
+    CHECK_STR(wire_of(1), "{\"type\":\"EVENT\",\"text\":\"ana joined\"}\n");
+}
+
+/* 49. Um MSG vai para TODOS, incluindo o emissor (D5).
+ *
+ *     SESS_ALL e nao SESS_OTHERS: e o proprio CHAT de volta que confirma ao
+ *     emissor que a mensagem chegou ao servidor — e e por isso que o cliente
+ *     nao deve ecoar localmente o que escreve. */
+static void caso_49_msg_vai_para_todos(void)
+{
+    CASE(49, "MSG -> 1 saida, destino ALL (D5)");
+    session_init(&s);
+    send_line("{\"type\":\"NICK\",\"nick\":\"ana\"}");
+    send_line("{\"type\":\"MSG\",\"text\":\"ola\"}");
+    CHECK_INT(n_outs, 1);
+    CHECK_INT(outs[0].dest, SESS_ALL);
+    CHECK_INT(outs[0].msg.type, MT_CHAT);
+}
+
+/* 50. Os erros sao SEMPRE so para quem se enganou: um cliente com um bug nao
+ *     deve encher o chat de toda a gente com ERROR. */
+static void caso_50_erros_so_para_o_proprio(void)
+{
+    CASE(50, "erro antes do NICK -> SELF");
+    session_init(&s);
+    send_line("{\"type\":\"MSG\",\"text\":\"cedo\"}");
+    CHECK_INT(n_outs, 1);
+    CHECK_INT(outs[0].dest, SESS_SELF);
+
+    CASE(50, "JSON invalido -> SELF");
+    send_line("nao e json");
+    CHECK_INT(outs[0].dest, SESS_SELF);
+
+    CASE(50, "segundo NICK -> SELF");
+    send_line("{\"type\":\"NICK\",\"nick\":\"ana\"}");
+    send_line("{\"type\":\"NICK\",\"nick\":\"rui\"}");
+    CHECK_INT(outs[0].dest, SESS_SELF);
+}
+
+/* 51. O EVENT de saida. */
+static void caso_51_leave(void)
+{
+    struct msg m;
+
+    CASE(51, "quem saiu depois do NICK tem EVENT de saida");
+    session_init(&s);
+    send_line("{\"type\":\"NICK\",\"nick\":\"ana\"}");
+    CHECK_INT(session_leave(&s, &m), 1);
+    CHECK_INT(m.type, MT_EVENT);
+    CHECK_INT(proto_encode(&m, wire, sizeof wire, NULL), 0);
+    CHECK_STR(wire, "{\"type\":\"EVENT\",\"text\":\"ana left\"}\n");
+
+    CASE(51, "quem sai ANTES do NICK nao gera EVENT: ninguem sabia que estava la");
+    session_init(&s);
+    CHECK_INT(session_leave(&s, &m), 0);
+
+    CASE(51, "um NICK recusado tambem nao conta como entrada");
+    session_init(&s);
+    send_line("{\"type\":\"NICK\",\"nick\":\"a b\"}");      /* espaco: invalido */
+    CHECK_INT(session_leave(&s, &m), 0);
+}
+
+/* 52. Um nick no limite (32 bytes) ainda produz EVENT validos e codificaveis.
+ *     O _Static_assert do session.c garante que cabe; isto executa-o. */
+static void caso_52_nick_no_limite(void)
+{
+    const char *n32 = "12345678901234567890123456789012";   /* 32 */
+
+    CASE(52, "nick de 32 bytes: EVENT de entrada cabe e codifica");
+    session_init(&s);
+    char line[128];
+    snprintf(line, sizeof line, "{\"type\":\"NICK\",\"nick\":\"%s\"}", n32);
+    send_line(line);
+    CHECK_INT(n_outs, 2);
+    CHECK_INT(proto_encode(&outs[1].msg, wire, sizeof wire, NULL), 0);
+
+    CASE(52, "e o de saida tambem");
+    struct msg m;
+    CHECK_INT(session_leave(&s, &m), 1);
+    CHECK_INT(proto_encode(&m, wire, sizeof wire, NULL), 0);
+    CHECK_STR(wire, "{\"type\":\"EVENT\",\"text\":"
+                    "\"12345678901234567890123456789012 left\"}\n");
+}
+
 /* ------------------------------------------------------------------------ */
 
 int main(void)
@@ -158,5 +282,10 @@ int main(void)
     caso_37_tipos_do_servidor();
     caso_38_nick_invalido();
     caso_39_sessao_completa();
+    caso_48_nick_gera_ok_e_event();
+    caso_49_msg_vai_para_todos();
+    caso_50_erros_so_para_o_proprio();
+    caso_51_leave();
+    caso_52_nick_no_limite();
     return t_report("session");
 }
