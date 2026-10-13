@@ -22,9 +22,9 @@ TEST_SRC := $(wildcard tests/unit/test_*.c)
 TEST_OBJ := $(patsubst tests/unit/%.c,$(BUILD)/tests/%.o,$(TEST_SRC))
 TEST_BIN := $(patsubst tests/unit/%.c,$(BIN)/tests/%,$(TEST_SRC))
 
-# Objetos do servidor SEM o main.o: a lógica do servidor (session.c) é testada
-# à unidade, e o binário de teste já tem o seu próprio main().
-SERVER_LIB_OBJ := $(filter-out $(BUILD)/server/main.o,$(SERVER_OBJ))
+# Objetos do servidor e do cliente SEM os main.o: a lógica deles (session.c,
+# ui.c) é testada à unidade, e cada binário de teste já tem o seu main().
+LIB_OBJ := $(filter-out %/main.o,$(SERVER_OBJ) $(CLIENT_OBJ))
 
 ALL_OBJ := $(COMMON_OBJ) $(SERVER_OBJ) $(CLIENT_OBJ) $(TEST_OBJ)
 
@@ -50,7 +50,7 @@ $(BUILD)/tests/%.o: tests/unit/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -Itests/unit -c $< -o $@
 
-$(BIN)/tests/%: $(BUILD)/tests/%.o $(COMMON_OBJ) $(SERVER_LIB_OBJ)
+$(BIN)/tests/%: $(BUILD)/tests/%.o $(COMMON_OBJ) $(LIB_OBJ)
 	@mkdir -p $(dir $@)
 	$(CC) $(LDFLAGS) $^ -o $@ $(LDLIBS)
 

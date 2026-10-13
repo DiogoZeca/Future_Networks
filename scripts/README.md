@@ -30,6 +30,21 @@ Resultado atual contra o nosso servidor: **18 ok, 0 falhas**.
 
 ---
 
+## `probe_client.py`
+
+O inverso do `interop.py`: testa o **nosso cliente** contra servidores falsos
+que se portam como o servidor de outro grupo *podia* portar-se — sem `OK` ao
+`NICK`, respostas byte a byte, um `EVENT` colado, nick recusado, fecho a meio,
+linha gigante, `\r\n`, linha que não é JSON. Como o `probe_m0.py`, é uma sonda:
+mostra o que o cliente imprime em cada caso. Resultados em `docs/milestones/M1.md`.
+
+```sh
+make
+python3 scripts/probe_client.py         # portas 5190-5197
+```
+
+---
+
 ## `probe_m0.py`
 
 Verificação funcional do servidor de echo. Arranca o `./bin/server`, provoca cinco cenários difíceis de reproduzir à mão, mata o servidor e mostra o log dele.

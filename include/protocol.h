@@ -115,6 +115,12 @@ int proto_parse(const char *line, size_t len, struct msg *out, struct proto_err 
  * NOSSA" (como o RX_FAULT): nunca é causado pelo peer. */
 int proto_encode(const struct msg *m, char *out, size_t cap, size_t *out_len);
 
+/* As regras de conteúdo acima, expostas para o cliente validar o que o
+ * utilizador escreve ANTES de tentar enviar (e dar uma mensagem de erro
+ * concreta). 1 = válido. São as mesmas funções que o parse e o encode usam. */
+int proto_valid_nick(const char *s);
+int proto_valid_text(const char *s);
+
 /* Nome do tipo no fio ("NICK", ...), ou "?" — para logs. */
 const char *proto_type_name(enum msg_type t);
 

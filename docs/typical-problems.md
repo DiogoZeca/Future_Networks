@@ -1,6 +1,10 @@
 # Problemas típicos
 
-Catálogo dos erros que aparecem sempre neste tipo de projeto (com base nos do professor mais alguns encontrados a testar a M=). 
+Catálogo dos erros que aparecem sempre neste tipo de projeto (com base nos do professor mais alguns encontrados a testar o M0 e o M1).
+
+Cada entrada tem um **Estado**. Os resolvidos no M1 estão explicados em detalhe
+(evidência do M0 → solução → prova) em
+[`milestones/M1.md` — "Problemas do M0 resolvidos no M1"](milestones/M1.md#problemas-do-m0-resolvidos-no-m1).
 
 ---
 
@@ -18,6 +22,21 @@ Não são hipóteses - foram observadas nesta máquina em 2026-10-12, com
 | `shutdown(SHUT_WR)` (half-close)          | Servidor vê `recv()==0`, fecha, cliente vê `recv()==0` - Já resolvido |
 | Reiniciar servidor na mesma porta         | Sem erro - `SO_REUSEADDR` está a funcionar - Já resolvido |
 
+## 0.1 Evidência medida no M1
+
+Observada em 2026-10-13, com o servidor do M1 compilado com `SAN=1`
+(detalhe em `milestones/M1.md`, "Verificação pela rede"):
+
+| Experiência | Resultado observado |
+|---|---|
+| Cenários de `tests/interop/` em 3 modos (linha / colado / byte a byte) | 18 ok - mensagens partidas e coladas tratadas com sockets reais |
+| 4 linhas num só `printf` para o `nc` | chegaram num só `recv()`; as 4 respostas certas |
+| 4096 bytes sem `\n` | `ERROR 400 "line too long"` + FIN |
+| 5000 bytes + `\n` | `ERROR 400 "line too long"` + **RST** - o servidor fechou com bytes por ler (ver 2.2) |
+| Meia mensagem + RST / + FIN | servidor sobrevive; o cliente seguinte é servido |
+| Linha com `'\0'` embebido | `ERROR 400 "invalid JSON"` |
+| Relatórios do ASan/UBSan | zero |
+
 ---
 
 ## 1. TCP é um byte stream, não um stream de mensagens
@@ -27,7 +46,7 @@ Não são hipóteses - foram observadas nesta máquina em 2026-10-12, com
 - **Problema:** o parser recebe meio JSON e rebenta, ou lê duas mensagens coladas como se fossem uma.
 - **Porquê:** TCP garante *ordem* e *integridade*, não *fronteiras*. O que o emissor escreveu em 1 `send()` pode chegar em N `recv()`, e N `send()` podem chegar em 1 `recv()` (coalescência / Nagle).
 - **Como evitar:** a aplicação define o enquadramento. Opções: tamanho fixo, delimitador com escaping, ou prefixo de comprimento. **Nós usamos delimitador `\n`** (fixado pelo enunciado). Implica um buffer de receção persistente por ligação que acumula bytes e extrai só linhas completas.
-- **Estado:** Por resolver - **M1** (é literalmente o objetivo do M1).
+- **Estado:** `Resolvido` - **M1**. Buffer por ligação (`struct rxbuf`, `src/common/framing.c`); um ciclo que extrai **todas** as linhas de cada `recv()`; o cliente vê o buffer antes de voltar ao `recv()`. Provas: testes #2, #3, #4, #24; `interop.py` modos `colado` e `byte-a-byte`. Ver M1.md, P1 e P2.
 
 ### 1.2 `send()` pode enviar só parte
 
@@ -42,14 +61,14 @@ Não são hipóteses - foram observadas nesta máquina em 2026-10-12, com
 - **Porquê:** hoje `send_all()` devolve `-1` em qualquer erro que não seja `EINTR`. Enquanto os sockets forem bloqueantes puros isso é seguro. Quando o M4 puser
 `SO_SNDTIMEO` (ou sockets não bloqueantes), `send()` passa a poder **aceitar parte dos bytes e só depois devolver `EAGAIN`/`EWOULDBLOCK`**. O código atual desiste *depois de já ter enviado meia mensagem* - o stream do peer fica corrompido e não há recuperação possível, porque o `\n` seguinte aparece no sítio errado.
 - **Como evitar:** quando se introduzir o timeout, decidir explicitamente entre (a) tratar `EAGAIN` como erro fatal **e fechar a ligação** (nunca voltar a escrever nela), ou (b) fila de envio por cliente. Nunca devolver erro e continuar a usar o socket.
-- **Estado:** `Parcialemte corrigido` - corrigir **no mesmo commit** em que entrar o timeout (**M4**).
+- **Estado:** `Parcialmente corrigido` - corrigir **no mesmo commit** em que entrar o timeout (**M4**). Nota: no M1 o cliente já usa `SO_RCVTIMEO` (timeout de **leitura**); esta armadilha é só do timeout de **envio**, que ainda não existe.
 
 ### 1.4 Linha maior que o buffer
 
 - **Sintoma:** buffer overflow, ou mensagens silenciosamente perdidas.
 - **Porquê:** um peer malicioso ou com bug envia 1 MB sem nenhum `\n`. Um buffer de receção fixo enche e não há linha para extrair.
 - **Como evitar:** limite explícito acordado na spec (proposta: 4096 bytes incl. `\n`) e, ao ser excedido, responder `ERROR 400` e fechar. **Nunca** truncar em silêncio e continuar a ler - os bytes restantes seriam interpretados como uma mensagem nova.
-- **Estado:** `Por resolver` - **M1**. Atenção: `BUF_SIZE` nos dois `main.c` é 4096 e a proposta de linha máxima também é 4096 - o buffer de receção tem de ser **maior** que a linha máxima (sobra do `recv()` anterior + linha nova), ou tem de tratar o caso explicitamente. Decidir no M1.
+- **Estado:** `Resolvido` - **M1**. `RX_CAP = RX_MAX_LINE + RX_CHUNK = 8192` (sobra até 4095 + `recv()` até 4096 = 8191), garantido por `_Static_assert`; linha > 4096 → `ERROR 400 "line too long"` e fecho, sem ressincronizar (D1/D2). Provas: #6 (com ASan), #7, #21, #22, #23. Ver M1.md, P3.
 
 ---
 
@@ -71,6 +90,7 @@ desligar?"*. São quatro cenários distintos, com sintomas diferentes.
 - **Porquê:** não houve FIN. Nota contraintuitiva que observámos: **fechar um socket que ainda tem dados por ler no buffer de receção pode gerar RST em vez de FIN** - ou seja, um cliente "bem comportado" que faz `close()` sem ler as respostas pendentes pode aparecer ao servidor como uma ligação abortada. Em execuções repetidas do `probe_m0.py` vimos as duas coisas, consoante o timing: **o servidor tem de aguentar ambas**, e não pode assumir que um cliente educado produz sempre `recv()==0`.
 - **Como evitar:** `MSG_NOSIGNAL` no `send()` (ou ignorar `SIGPIPE` no arranque), e tratar `ECONNRESET`/`EPIPE` como "cliente foi-se embora" - não como erro fatal do servidor.
 - **Estado:** `Resolvido` - `MSG_NOSIGNAL` em `send_all()`; verificado experimentalmente nos dois sentidos.
+- **Visto de novo no M1, do nosso lado:** ao recusar uma linha demasiado longa, o servidor fecha com bytes do cliente **ainda por ler** - e o kernel manda RST. Se o RST chegar antes de o cliente ler o `ERROR "line too long"`, o cliente nunca o vê. Resolver exige continuar a ler (e deitar fora) durante algum tempo antes de fechar, o que precisa de timeouts - **M4**.
 
 ### 2.3 Morte silenciosa - cabo desligado, Wi-Fi caído, máquina sem energia
 
@@ -87,7 +107,7 @@ desligar?"*. São quatro cenários distintos, com sintomas diferentes.
 - **Sintoma:** **todos** os outros utilizadores ficam bloqueados. O chat congela.
 - **Porquê:** o servidor faz broadcast com `send()` bloqueante. Se um cliente não lê, a janela TCP dele fecha, o buffer de envio do servidor enche e o `send()` bloqueia - com o lock da lista de clientes na mão, no pior caso. Um único cliente parado (ou um `Ctrl+S` no terminal, ou um portátil suspenso) para o servidor inteiro.
 - **Como evitar:** `SO_SNDTIMEO` + desligar quem estourar o timeout, ou fila de envio por cliente com thread de escrita dedicada. **E nunca fazer `send()` com um mutex global agarrado** (ver 3.2).
-**Estado:** `Por Resolver` - **M2/M4**. Fácil de demonstrar: basta suspender um cliente com `Ctrl+Z` e ver o resto do chat parar.
+- **Estado:** `Por Resolver` - **M2/M4**. Fácil de demonstrar: basta suspender um cliente com `Ctrl+Z` e ver o resto do chat parar.
 
 ---
 
@@ -105,7 +125,7 @@ desligar?"*. São quatro cenários distintos, com sintomas diferentes.
 - **Sintoma:** o chat fica lento ou bloqueia completamente quando um cliente é lento.
 - **Porquê:** combina 2.4 com 3.1 - um `send()` que bloqueia dentro da secção crítica transforma um cliente lento num deadlock global.
 - **Como evitar:** o lock protege a *estrutura de dados*, nunca a *E/S*. Copiar e sair.
-- **Estado:** `Por Resovler` - **M2**.
+- **Estado:** `Por Resolver` - **M2**.
 
 ### 3.3 Mensagens de vários emissores intercaladas no mesmo socket
 
@@ -144,7 +164,7 @@ desligar?"*. São quatro cenários distintos, com sintomas diferentes.
 - **Como evitar:** uma de duas, mas decidir explicitamente:
   - declarar **"IPv4 apenas"** no `PROTOCOL.md` (mais simples, e suficiente para uma LAN); ou
   - escutar em `AF_INET6` com `IPV6_V6ONLY=0` (dual-stack). Atenção: no Windows o `IPV6_V6ONLY` vem a **1** por omissão, ao contrário de muitos Linux - se um grupo fizer isto em Windows sem desligar a opção, perde os clientes IPv4.
-- **Estado:** funciona, mas por acidente.
+- **Estado:** funciona, mas por acidente. **Proposta** no `PROTOCOL.md` v0.2 §1: IPv4 apenas (por acordar com os outros grupos).
 
 ### 4.4 NAT e endereços privados
 
@@ -178,21 +198,21 @@ Relevante porque os outros grupos não usam todos Linux.
 - **Sintoma:** o peer recebe duas "mensagens", ambas inválidas.
 - **Porquê:** JSON com pretty-printing, ou texto do utilizador com newline literal.
 - **Como evitar:** `cJSON_PrintUnformatted()` (nunca `cJSON_Print()`). O cJSON faz escape de `\n` dentro de strings para `\\n`, o que é seguro. Verificar na mesma antes de enviar.
-- **Estado:** `Por Resolver` - **M1**.
+- **Estado:** `Resolvido` - **M1**. `cJSON_PrintUnformatted()`; caracteres de controlo recusados em `nick`/`text` (sem mensagens multi-linha), o que limita o crescimento ao codificar a 2× e garante, por `_Static_assert`, que a maior mensagem (2164 bytes) cabe numa linha. Provas: #18, #27, #31. Ver M1.md, P8.
 
 ### 6.2 UTF-8 cortado entre dois `recv()`
 
 - **Sintoma:** acentos corrompidos ("Ã©") quando a mensagem chega partida.
 - **Porquê (e boa notícia):** **partir em `\n` é sempre seguro em UTF-8.** Todos os bytes de continuação de uma sequência multibyte são ≥ 0x80, por isso 0x0A nunca aparece *dentro* de um caracter. Partir o *buffer* a meio de um caracter também não é problema **desde que nunca se interprete o buffer como texto antes de ter a linha completa**. O bug aparece quando se faz `printf("%s")` ou validação de UTF-8 sobre um buffer parcial.
 - **Como evitar:** tratar os bytes como opacos até haver `\n`. Só então passar ao JSON.
-- **Estado:** `Por resolver` - **M1**.
+- **Estado:** `Resolvido` - **M1** (decisão D3: bytes opacos até haver linha completa; nenhum `printf` sobre o buffer). Provas: #9; `interop.py` cenário 06 em modo `byte-a-byte`. Ver M1.md, P7.
  
 ### 6.3 JSON inválido ou campos em falta
 
 - **Sintoma:** segfault no `cJSON_GetObjectItem(...)->valuestring`.
 - **Porquê:** o cJSON devolve `NULL` para campos ausentes e o tipo pode não ser o esperado (`{"type":"MSG","text":123}`).
 - **Como evitar:** validar sempre: item não-`NULL` **e** `cJSON_IsString()`. Um peer de outro grupo vai enviar algo inesperado - é garantido.
-**Estado:** `Por Resolver` - **M1**.
+- **Estado:** `Resolvido` - **M1**. Três verificações por campo (existe, tipo certo, limites) antes de tocar em `valuestring`; `ERROR 400` com motivo, sem fechar a ligação. Também recusados: lixo depois do objeto (`{…}{…}`) e `'\0'` embebido. Provas: #12–#16, #25–#30. Ver M1.md, P5 e P6.
 
 ---
 
@@ -200,10 +220,10 @@ Relevante porque os outros grupos não usam todos Linux.
 
 | Problema | Como evitar | Estado |
 |---|---|---|
-| Fugas do cJSON | Cada `cJSON_Parse()` precisa de `cJSON_Delete()`; cada `cJSON_PrintUnformatted()` devolve memória que é preciso libertar | `Por Resolver` - **M1** |
+| Fugas do cJSON | Cada `cJSON_Parse()` precisa de `cJSON_Delete()`; cada `cJSON_PrintUnformatted()` devolve memória que é preciso libertar | `Resolvido` - **M1**: uma única saída por função; mutações apanhadas pelo LeakSanitizer (M1.md, P9) |
 | Fuga de descritores | Falhar um `close(fd)` num caminho de erro esgota o limite de fds; o servidor deixa de aceitar ligações ao fim de ~1024 | `Parcial Resolvido` - rever cada `goto`/`break` |
 | Buffer na stack por thread | Com N clientes, N × buffer. Escolher tamanhos conscientemente | `por Resolver` - **M2** |
-| Strings sem terminador | `recv()` **não** põe `\0`. Nunca passar o buffer a `printf("%s")` sem limitar o tamanho | `Parcial correto` - o `main.c` atual usa `%.*s`, correto |
+| Strings sem terminador | `recv()` **não** põe `\0`. Nunca passar o buffer a `printf("%s")` sem limitar o tamanho | `Resolvido` - **M1**: comprimento sempre explícito (`out_len`), linhas com `'\0'` recusadas, `%.*s` nos logs (M1.md, P6) |
 
 **Ferramenta:** `make SAN=1` (ASan + UBSan) já está no Makefile. Usar **sempre** que se testa concorrência, não só quando algo rebenta.
 
@@ -215,11 +235,11 @@ Relevante porque os outros grupos não usam todos Linux.
 |---|---|
 | Cada grupo resolve a semântica ambígua de forma diferente | Fechar as secções *TO AGREE* do `PROTOCOL.md` **com os outros grupos**, por escrito, antes do M3 |
 | Porta diferente por grupo | Acordar a porta por omissão (proposta: 5000) |
-| O emissor de `MSG` recebe o próprio `CHAT`? | Está em aberto na spec. Se um grupo decide que sim e outro que não, as mensagens aparecem duplicadas ou em falta - e parece um bug de rede |
-| `OK` a todos os pedidos ou só a alguns? | Em aberto. Um cliente que espere `OK` bloqueia contra um servidor que não o envia |
+| O emissor de `MSG` recebe o próprio `CHAT`? | Se um grupo decide que sim e outro que não, as mensagens aparecem duplicadas ou em falta - e parece um bug de rede. **Proposta nossa (D5): sim** - `PROTOCOL.md` v0.2, por acordar |
+| `OK` a todos os pedidos ou só a alguns? | Um cliente que espere `OK` bloqueia contra um servidor que não o envia. **Proposta nossa (D6): `OK` ao `NICK`**; o nosso cliente tem timeout de 5 s para não bloquear contra quem decidir diferente |
 | Campos desconhecidos | A spec já diz: **ignorar**. Isto permite extensões sem partir ninguém |
-| Nicks com maiúsculas/acentos/espaços | Em aberto. Definir: comprimento máximo, caracteres permitidos, case-sensitive |
-| Testar só contra nós próprios | Os cenários em `tests/interop/` são texto puro e correm contra qualquer servidor. Usar desde o M1 |
+| Nicks com maiúsculas/acentos/espaços | **Proposta nossa (D4):** 1–32 bytes, sem espaços nem caracteres de controlo, UTF-8 aceite sem validar; case-sensitive ainda por decidir (importa no M3, nicks únicos) |
+| Testar só contra nós próprios | Os cenários em `tests/interop/` são texto puro e correm contra qualquer servidor com `scripts/interop.py` (3 modos de envio). `scripts/probe_client.py` mostra como o nosso cliente reage a servidores que decidiram diferente |
 
 **Regra prática:** ser **estrito a enviar, tolerante a receber**. Nunca rebentar por causa do que o peer mandou - responder `ERROR` e continuar.
 

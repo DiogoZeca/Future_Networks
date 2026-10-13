@@ -34,8 +34,8 @@ static int valid_str(const char *s, size_t min, size_t max, int no_space)
     return 1;
 }
 
-static int valid_nick(const char *s)   { return valid_str(s, 1, PROTO_NICK_MAX, 1); }
-static int valid_text(const char *s)   { return valid_str(s, 1, PROTO_TEXT_MAX, 0); }
+int proto_valid_nick(const char *s)    { return valid_str(s, 1, PROTO_NICK_MAX, 1); }
+int proto_valid_text(const char *s)    { return valid_str(s, 1, PROTO_TEXT_MAX, 0); }
 static int valid_reason(const char *s) { return valid_str(s, 0, PROTO_REASON_MAX, 0); }
 static int valid_code(int code)        { return code >= 100 && code <= 999; }
 
@@ -126,12 +126,12 @@ int proto_parse(const char *line, size_t len, struct msg *out, struct proto_err 
     out->type = type_from_name(type->valuestring);
     switch (out->type) {
     case MT_NICK:
-        if (!get_str(root, "nick", out->nick, sizeof out->nick, valid_nick))
+        if (!get_str(root, "nick", out->nick, sizeof out->nick, proto_valid_nick))
             goto out;
         break;
 
     case MT_MSG:
-        if (!get_str(root, "text", out->text, sizeof out->text, valid_text))
+        if (!get_str(root, "text", out->text, sizeof out->text, proto_valid_text))
             goto out;
         break;
 
@@ -139,8 +139,8 @@ int proto_parse(const char *line, size_t len, struct msg *out, struct proto_err 
         break;
 
     case MT_CHAT: {
-        if (!get_str(root, "from", out->from, sizeof out->from, valid_nick) ||
-            !get_str(root, "text", out->text, sizeof out->text, valid_text))
+        if (!get_str(root, "from", out->from, sizeof out->from, proto_valid_nick) ||
+            !get_str(root, "text", out->text, sizeof out->text, proto_valid_text))
             goto out;
         /* "private" é opcional: ausente = false; presente tem de ser bool. */
         const cJSON *pv = cJSON_GetObjectItemCaseSensitive(root, "private");
@@ -185,10 +185,10 @@ out:
 static int valid_msg(const struct msg *m)
 {
     switch (m->type) {
-    case MT_NICK:  return valid_nick(m->nick);
-    case MT_MSG:   return valid_text(m->text);
+    case MT_NICK:  return proto_valid_nick(m->nick);
+    case MT_MSG:   return proto_valid_text(m->text);
     case MT_OK:    return 1;
-    case MT_CHAT:  return valid_nick(m->from) && valid_text(m->text);
+    case MT_CHAT:  return proto_valid_nick(m->from) && proto_valid_text(m->text);
     case MT_ERROR: return valid_code(m->code) && valid_reason(m->reason);
     default:       return 0;
     }
