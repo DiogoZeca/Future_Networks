@@ -11,8 +11,8 @@ O protocolo comum está em [`docs/PROTOCOL.md`](docs/PROTOCOL.md).
 
 | #  | Fase                   | Estado |
 |----|------------------------|--------|
-| M0 | Echo warm-up           | Done |
-| M1 | Framing + protocolo    | TODO |
+| M0 | Echo warm-up           | DONE |
+| M1 | Framing + protocolo    | DONE |
 | M2 | Vários clientes        | TODO |
 | M3 | Comandos + spec        | TODO |
 | M4 | Robustez e testes      | TODO |
@@ -24,14 +24,18 @@ Notas de cada fase em [`docs/milestones/`](docs/milestones/).
 ## Estrutura
 
 ```
-include/         headers partilhados (net.h, framing.h, protocol.h)
+include/         headers (net.h, framing.h, protocol.h, session.h, ui.h)
 src/common/      código usado por cliente e servidor
   net.c            sockets: criar, ligar, send_all
   framing.c        bytes <-> linhas (buffer de receção, split em '\n')
   protocol.c       linhas <-> mensagens JSON validadas
-src/server/      main do servidor
-src/client/      main do cliente
-tests/unit/      testes das camadas framing/protocol
+src/server/      servidor
+  session.c        máquina de estados por ligação (testada à unidade)
+  main.c           sockets à volta das camadas
+src/client/      cliente
+  ui.c             texto <-> mensagens (testada à unidade)
+  main.c           pedido-resposta sobre o socket
+tests/unit/      testes framing / protocol / session / ui (make test)
 tests/interop/   cenários em texto, independentes da linguagem
 docs/            especificação do protocolo e notas por fase
 scripts/         utilitários (correr cenários de interop, etc.)
@@ -46,7 +50,9 @@ sudo pacman -S cjson            # Arch
 sudo apt install libcjson-dev   # Ubuntu/Debian
 make            # compila para bin/
 ./bin/server 5000
-./bin/client <ip> 5000
+./bin/client <ip> 5000 ana      # o nick é pedido se não for dado
+make test       # testes unitários (make test SAN=1 com sanitizers)
 ```
 
 Teste rápido sem o nosso cliente: `nc <ip> 5000` e escrever JSON à mão.
+Contra qualquer servidor: `python3 scripts/interop.py <ip> 5000`.

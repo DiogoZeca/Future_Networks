@@ -1,0 +1,5 @@
+# MSG -> o emissor recebe o seu proprio CHAT (D5)
+> {"type":"NICK","nick":"ana"}
+< {"type":"OK"}
+> {"type":"MSG","text":"hello"}
+< {"type":"CHAT","from":"ana","text":"hello","private":false}
