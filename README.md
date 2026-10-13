@@ -11,13 +11,13 @@ O protocolo comum está em [`docs/PROTOCOL.md`](docs/PROTOCOL.md).
 
 | #  | Fase                   | Estado |
 |----|------------------------|--------|
-| M0 | Echo warm-up           | ⏳ |
-| M1 | Framing + protocolo    | ⏳ |
-| M2 | Vários clientes        | ⏳ |
-| M3 | Comandos + spec        | ⏳ |
-| M4 | Robustez e testes      | — |
-| M5 | Descoberta UDP         | — |
-| M6 | Extensão               | — |
+| M0 | Echo warm-up           | DONE |
+| M1 | Framing + protocolo    | TODO |
+| M2 | Vários clientes        | TODO |
+| M3 | Comandos + spec        | TODO |
+| M4 | Robustez e testes      | TODO |
+| M5 | Descoberta UDP         | TODO |
+| M6 | Extensão               | TODO |
 
 Notas de cada fase em [`docs/milestones/`](docs/milestones/).
 
