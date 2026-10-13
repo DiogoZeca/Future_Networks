@@ -26,16 +26,17 @@
  *
  * QUEM PROTEGE O QUÊ
  * ------------------
- *   roster.lock   a lista (v[], n) e, em cada cliente, `refs` e `listed`.
+ *   roster.lock   a lista (v[], n) e, em cada cliente, `nick`, `joined`,
+ *                 `refs` e `listed`.
  *   client.wlock  a escrita no socket desse cliente. Serializa os send_all()
  *                 de threads diferentes: cada send() é atómico, mas o CICLO do
  *                 send_all() não é, e duas threads a escrever ao mesmo tempo
  *                 no mesmo fd intercalam metade de uma mensagem com metade de
  *                 outra (§3.3). O cliente receberia JSON corrompido.
- *   ninguém       fd, who, nick: escritos e lidos SÓ pela thread dona do
- *                 cliente. O broadcast lê o `fd` de outros, o que é seguro
- *                 porque o fd não muda durante a vida do cliente e o refcount
- *                 garante que não é fechado enquanto houver referências.
+ *   ninguém       fd e who: escritos uma vez no roster_add() e só lidos depois.
+ *                 O broadcast lê o `fd` de outros, o que é seguro porque não
+ *                 muda durante a vida do cliente e o refcount garante que não
+ *                 é fechado enquanto houver referências.
  *
  * ORDEM DOS LOCKS: nunca segurar roster.lock e um client.wlock ao mesmo tempo.
  * O broadcast larga o primeiro antes de pegar no segundo. Enquanto esta regra
@@ -71,14 +72,15 @@ struct client {
     /* --- da thread dona; o broadcast só lê o fd --- */
     int  fd;                          /* -1 é válido (usado nos testes)       */
     char who[64];                     /* "ip:porta", para os logs             */
-    char nick[PROTO_NICK_MAX + 1];    /* "" até o NICK ser aceite             */
 
     /* --- serializa as escritas neste socket --- */
     pthread_mutex_t wlock;
 
     /* --- protegidos por roster.lock --- */
-    int refs;                         /* 0 => fechar o fd e libertar          */
-    int listed;                       /* 1 enquanto estiver em v[]            */
+    char nick[PROTO_NICK_MAX + 1];    /* "" até o NICK ser aceite             */
+    int  joined;                      /* 1 = está no chat (ver roster_join)   */
+    int  refs;                        /* 0 => fechar o fd e libertar          */
+    int  listed;                      /* 1 enquanto estiver em v[]            */
 };
 
 struct roster {
@@ -114,14 +116,30 @@ struct client *roster_add(struct roster *r, int fd, const char *who);
  * Chamar duas vezes é seguro (a segunda não faz nada). */
 void roster_remove(struct roster *r, struct client *c);
 
+/* Marca o cliente como participante do chat e guarda o nick dele.
+ *
+ * Entre o accept() e o NICK aceite, um cliente ESTÁ na lista mas ainda não faz
+ * parte do chat: está a meio do handshake aplicacional. Até esta chamada não
+ * aparece em roster_snapshot(), logo não recebe EVENT nem CHAT.
+ *
+ * Sem isto, um cliente que acabou de ligar recebia os EVENT de quem entrasse
+ * entretanto, e a primeira linha que via não era o OK ao seu NICK mas o aviso
+ * de outra pessoa. O nosso cliente aguenta; um de outro grupo que espere o OK
+ * como primeira resposta parte-se — e é precisamente o tipo de divergência que
+ * só aparece no dia da interoperabilidade.
+ *
+ * Idempotente. */
+void roster_join(struct roster *r, struct client *c, const char *nick);
+
 /* Larga UMA referência. A zero: fecha o fd (se >= 0), destrói o wlock e liberta
  * a memória. Depois desta chamada o ponteiro pode já não ser válido. */
 void client_release(struct roster *r, struct client *c);
 
 /* ---- Broadcast ---------------------------------------------------------- */
 
-/* Copia para out[] os clientes que estão na lista, incrementando o refcount de
- * cada um. Devolve quantos copiou (no máximo `cap`).
+/* Copia para out[] os clientes que JÁ ENTRARAM no chat (ver roster_join),
+ * incrementando o refcount de cada um. Devolve quantos copiou (no máximo
+ * `cap`). Quem ainda não fez NICK fica de fora.
  *
  * O CHAMADOR TEM DE CHAMAR client_release() EM CADA UM. Sem isso, nenhum
  * cliente é libertado e o servidor fica a segurar fds para sempre.
@@ -133,8 +151,9 @@ size_t roster_snapshot(struct roster *r, struct client **out, size_t cap,
 
 /* ---- Leitura ------------------------------------------------------------ */
 
-/* Quantos clientes estão na lista. Para logs e testes: no instante a seguir
- * já pode ser outro número, por isso nunca decidir nada com base nisto. */
+/* Quantos clientes estão na lista, INCLUINDO os que ainda não fizeram NICK.
+ * Para logs e testes: no instante a seguir já pode ser outro número, por isso
+ * nunca decidir nada com base nisto. */
 size_t roster_count(struct roster *r);
 
 #endif /* ROSTER_H */

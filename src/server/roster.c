@@ -120,6 +120,14 @@ void roster_remove(struct roster *r, struct client *c)
         destroy_client(c);
 }
 
+void roster_join(struct roster *r, struct client *c, const char *nick)
+{
+    pthread_mutex_lock(&r->lock);
+    snprintf(c->nick, sizeof c->nick, "%s", nick);
+    c->joined = 1;
+    pthread_mutex_unlock(&r->lock);
+}
+
 void client_release(struct roster *r, struct client *c)
 {
     if (c == NULL)
@@ -144,6 +152,10 @@ size_t roster_snapshot(struct roster *r, struct client **out, size_t cap,
     pthread_mutex_lock(&r->lock);
     for (size_t i = 0; i < r->n && n < cap; i++) {
         if (r->v[i] == except)
+            continue;
+        /* Quem ainda não fez NICK não está no chat: receberia EVENT e CHAT
+         * antes do OK ao seu próprio NICK. */
+        if (!r->v[i]->joined)
             continue;
         /* O incremento acontece DENTRO do lock, ao mesmo tempo que a leitura
          * do ponteiro. É esta atomicidade que fecha a janela: a partir daqui o

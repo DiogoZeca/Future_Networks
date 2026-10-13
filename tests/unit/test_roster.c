@@ -33,6 +33,17 @@ static struct roster R;
     if ((p) == NULL) { roster_destroy(&R); return; } \
 } while (0)
 
+/* add + join: e o par que o servidor faz, o add no accept() e o join quando o
+ * NICK e aceite. Quase todos os casos querem um cliente que JA esta no chat,
+ * porque e esse que aparece no retrato. O caso 14 testa o estado intermedio. */
+static struct client *add_joined(const char *who, const char *nick)
+{
+    struct client *c = roster_add(&R, -1, who);
+    if (c != NULL)
+        roster_join(&R, c, nick);
+    return c;
+}
+
 /* ------------------------------------------------------------------------ */
 
 /* 1. Roster vazio. */
@@ -54,7 +65,7 @@ static void caso_2_entrar(void)
     struct client *snap[ROSTER_MAX];
 
     roster_init(&R);
-    struct client *c = roster_add(&R, -1, "1.2.3.4:5000");
+    struct client *c = add_joined("1.2.3.4:5000", "ana");
     NEED(c);
     CHECK_INT(roster_count(&R), 1);
 
@@ -62,7 +73,7 @@ static void caso_2_entrar(void)
     CHECK_INT(n, 1);
     CHECK(n == 1 && snap[0] == c);
     CHECK_STR(c->who, "1.2.3.4:5000");
-    CHECK_STR(c->nick, "");                    /* vazio ate ao NICK */
+    CHECK_STR(c->nick, "ana");
 
     for (size_t i = 0; i < n; i++)
         client_release(&R, snap[i]);
@@ -78,7 +89,7 @@ static void caso_3_sair(void)
     struct client *snap[ROSTER_MAX];
 
     roster_init(&R);
-    struct client *c = roster_add(&R, -1, "a");
+    struct client *c = add_joined("a", "ana");
     NEED(c);
     roster_remove(&R, c);
 
@@ -100,7 +111,7 @@ static void caso_4_retrato_segura_o_cliente(void)
     struct client *snap[ROSTER_MAX];
 
     roster_init(&R);
-    struct client *c = roster_add(&R, -1, "a");
+    struct client *c = add_joined("a", "ana");
     NEED(c);
 
     size_t n = roster_snapshot(&R, snap, ROSTER_MAX, NULL);  /* refs += 1 */
@@ -125,9 +136,9 @@ static void caso_5_except(void)
     struct client *snap[ROSTER_MAX];
 
     roster_init(&R);
-    struct client *a = roster_add(&R, -1, "a");
+    struct client *a = add_joined("a", "ana");
     NEED(a);
-    struct client *b = roster_add(&R, -1, "b");
+    struct client *b = add_joined("b", "rui");
     NEED(b);
 
     size_t n = roster_snapshot(&R, snap, ROSTER_MAX, a);
@@ -155,7 +166,7 @@ static void caso_6_cap(void)
     roster_init(&R);
     struct client *c[3];
     for (int i = 0; i < 3; i++) {
-        c[i] = roster_add(&R, -1, "x");
+        c[i] = add_joined("x", "n");
         NEED(c[i]);
     }
 
@@ -191,7 +202,7 @@ static void caso_8_remove_duas_vezes(void)
 {
     CASE(8, "remove duas vezes e seguro");
     roster_init(&R);
-    struct client *c = roster_add(&R, -1, "a");
+    struct client *c = add_joined("a", "ana");
     NEED(c);
 
     roster_remove(&R, c);
@@ -213,6 +224,7 @@ static void caso_9_fecha_o_fd(void)
     roster_init(&R);
     struct client *c = roster_add(&R, p[1], "a");
     NEED(c);
+    roster_join(&R, c, "ana");
 
     CHECK_INT(fcntl(p[1], F_GETFD) != -1, 1);  /* ainda aberto */
     roster_remove(&R, c);
@@ -251,6 +263,7 @@ static void *worker_entra_sai(void *arg)
         struct client *c = roster_add(&R, -1, "t");
         if (c == NULL)
             continue;                          /* lista cheia: normal aqui */
+        roster_join(&R, c, "t");
         roster_remove(&R, c);
         client_release(&R, c);
     }
@@ -320,7 +333,7 @@ static void caso_13_estaveis_e_retratos(void)
 
     roster_init(&R);
     for (int i = 0; i < 3; i++) {
-        fixos[i] = roster_add(&R, -1, "fixo");
+        fixos[i] = add_joined("fixo", "f");
         NEED(fixos[i]);
     }
 
@@ -332,6 +345,56 @@ static void caso_13_estaveis_e_retratos(void)
     CHECK_INT(roster_count(&R), 3);            /* os fixos continuam la */
     for (int i = 0; i < 3; i++) { roster_remove(&R, fixos[i]); client_release(&R, fixos[i]); }
     CHECK_INT(roster_count(&R), 0);
+    roster_destroy(&R);
+}
+
+/* 14. Quem ainda NAO fez NICK esta na lista mas NAO recebe broadcasts.
+ *
+ *     Entre o accept() e o NICK aceite o cliente esta a meio do handshake
+ *     aplicacional. Sem esta separacao, a primeira linha que via nao era o OK
+ *     ao seu proprio NICK mas o EVENT de outra pessoa a entrar — e um cliente
+ *     de outro grupo que espere o OK como primeira resposta parte-se. */
+static void caso_14_so_entra_no_chat_depois_do_nick(void)
+{
+    struct client *snap[ROSTER_MAX];
+
+    CASE(14, "ligado mas sem NICK: conta na lista, fora do retrato");
+    roster_init(&R);
+    struct client *novo = roster_add(&R, -1, "sem-nick");
+    NEED(novo);
+    CHECK_INT(roster_count(&R), 1);                /* esta na lista      */
+    CHECK_INT(roster_snapshot(&R, snap, ROSTER_MAX, NULL), 0);  /* mas nao no chat */
+    CHECK_INT(novo->joined, 0);
+    CHECK_STR(novo->nick, "");
+
+    CASE(14, "depois do roster_join entra no retrato, com o nick");
+    roster_join(&R, novo, "ana");
+    CHECK_INT(novo->joined, 1);
+    CHECK_STR(novo->nick, "ana");
+    size_t n = roster_snapshot(&R, snap, ROSTER_MAX, NULL);
+    CHECK_INT(n, 1);
+    for (size_t i = 0; i < n; i++)
+        client_release(&R, snap[i]);
+
+    CASE(14, "um que entrou nao ve no retrato outro que ainda nao fez NICK");
+    struct client *mudo = roster_add(&R, -1, "mudo");
+    NEED(mudo);
+    CHECK_INT(roster_count(&R), 2);
+    n = roster_snapshot(&R, snap, ROSTER_MAX, NULL);
+    CHECK_INT(n, 1);                                /* so o que ja entrou */
+    CHECK(n == 1 && snap[0] == novo);
+    for (size_t i = 0; i < n; i++)
+        client_release(&R, snap[i]);
+
+    CASE(14, "roster_join e idempotente");
+    roster_join(&R, novo, "ana");
+    n = roster_snapshot(&R, snap, ROSTER_MAX, NULL);
+    CHECK_INT(n, 1);
+    for (size_t i = 0; i < n; i++)
+        client_release(&R, snap[i]);
+
+    roster_remove(&R, novo); client_release(&R, novo);
+    roster_remove(&R, mudo); client_release(&R, mudo);
     roster_destroy(&R);
 }
 
@@ -349,6 +412,7 @@ int main(void)
     caso_8_remove_duas_vezes();
     caso_9_fecha_o_fd();
     caso_10_destroy();
+    caso_14_so_entra_no_chat_depois_do_nick();
     caso_11_entra_sai_em_paralelo();
     caso_12_retrato_vs_saida();
     caso_13_estaveis_e_retratos();
