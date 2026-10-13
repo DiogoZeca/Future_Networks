@@ -1,18 +1,45 @@
 /*
- * M1 — cliente de chat, em modo PEDIDO-RESPOSTA.
+ * M2 — cliente de chat, com DUAS threads.
  *
- *   ligar -> NICK -> ler 1 resposta
- *   por cada linha do teclado: MSG -> ler 1 resposta -> mostrar
- *   Ctrl+D: half-close (shutdown SHUT_WR), mostrar o que faltar, sair
+ *   thread principal   teclado -> MSG -> socket
+ *   thread de leitura  socket  -> mostrar no ecrã
  *
  * Do lado do socket usa o MESMO framing que o servidor: as respostas também
  * podem chegar partidas ou coladas. Toda a conversão texto <-> mensagem está
  * em ui.c e protocol.c, testadas à unidade; aqui é só canalização.
  *
- * Limitação assumida do M1: só se lê o socket depois de enviar. Com o
- * servidor do M1 chega, porque cada pedido tem exatamente uma resposta. Se um
- * servidor não responder (D5/D6 ainda por acordar), o timeout evita ficar
- * preso para sempre. O M2 passa a ler o socket numa thread à parte.
+ *
+ * PORQUE É QUE O CLIENTE DO M1 DEIXOU DE CHEGAR
+ * ---------------------------------------------
+ * No M1 era pedido-resposta: enviar, ler UMA resposta, repetir. Funcionava
+ * porque o servidor respondia exatamente uma linha a cada linha recebida, e só
+ * a quem a enviou.
+ *
+ * No M2 isso deixa de ser verdade de duas maneiras:
+ *
+ *   - chegam mensagens que não pedimos (o CHAT de outra pessoa, um EVENT de
+ *     entrada ou saída), a qualquer momento;
+ *   - um envio nosso pode ter MAIS do que uma resposta à frente na fila.
+ *
+ * Com o ciclo do M1, as mensagens dos outros ficavam no buffer do kernel e só
+ * apareciam quando NÓS escrevêssemos alguma coisa — e desalinhadas, porque o
+ * await_reply lia só uma linha de cada vez. Um chat em que só se vê o que os
+ * outros dizem depois de falarmos não é um chat.
+ *
+ *
+ * PORQUE É QUE NÃO HÁ LOCKS NENHUNS AQUI
+ * --------------------------------------
+ * Uma ligação TCP é full-duplex: os dois sentidos são independentes. Como cada
+ * thread usa um sentido só — a principal escreve, a de leitura lê — nenhuma
+ * estrutura é partilhada:
+ *
+ *   rx (rxbuf)   só a thread de leitura lhe toca, depois do arranque
+ *   send_all()   só a thread principal o chama
+ *   printf()     cada chamada é atómica na glibc; as linhas podem aparecer
+ *                por ordens diferentes, mas nunca partidas a meio
+ *
+ * É por isso que o servidor precisa de um wlock por cliente e o cliente não
+ * precisa de nenhum: lá há N threads a escrever no mesmo socket, aqui há uma.
  *
  * Uso: ./bin/client <host> [porta] [nick]   (sem nick, é pedido ao arrancar)
  */
@@ -22,6 +49,8 @@
 #include "ui.h"
 
 #include <errno.h>
+#include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -29,22 +58,29 @@
 #include <unistd.h>
 
 #define DEFAULT_PORT     "5000"
-#define REPLY_TIMEOUT_S  5          /* quanto esperar por uma resposta */
+#define REPLY_TIMEOUT_S  5          /* só para a resposta ao NICK */
 
-/* Estado da ligação do lado do cliente: um rxbuf, como cada ligação no
- * servidor. static porque tem 8 KB e só há uma ligação. */
+/* Estado da ligação: um rxbuf, como cada ligação no servidor. */
 static struct rxbuf rx;
+
+/* 1 = fomos nós que decidimos sair (Ctrl+D). Serve para a thread de leitura
+ * saber se o fecho do servidor é o fim esperado ou uma queda.
+ *
+ * _Atomic e não `volatile sig_atomic_t`: esse é o idioma para SINAIS, e não dá
+ * garantia nenhuma de sincronização entre THREADS — o ThreadSanitizer aponta-o
+ * como data race, e tem razão. Com _Atomic (C11) a leitura e a escrita são
+ * atómicas e sequencialmente consistentes, sem precisar de um mutex para um
+ * único inteiro. */
+static _Atomic int quitting = 0;
 
 /* Lê UMA linha do servidor.
  *   1 = linha em line/len | 0 = timeout | -2 = o servidor fechou (FIN)
  *  -1 = erro ou linha demasiado longa
- * O fecho tem código próprio porque nem sempre é um problema: depois do
- * nosso Ctrl+D é exatamente o que esperamos. Quem chama decide se avisa.
  *
  * A ordem importa: primeiro ver se o rxbuf JÁ tem uma linha completa (o
- * servidor pode ter mandado duas respostas coladas num só segmento) e só
- * depois ir ao recv(). Ao contrário, a segunda resposta ficava esquecida no
- * buffer até chegarem mais bytes. */
+ * servidor pode ter mandado várias coladas num só segmento) e só depois ir ao
+ * recv(). Ao contrário, a segunda ficava esquecida no buffer até chegarem mais
+ * bytes — e com um CHAT à frente de um EVENT isso dava-se sempre. */
 static int read_line(int fd, char *line, size_t *len)
 {
     char chunk[RX_CHUNK];
@@ -64,7 +100,8 @@ static int read_line(int fd, char *line, size_t *len)
         if (n == 0)
             return -2;
         if (n < 0) {
-            perror("recv");
+            if (!quitting)
+                perror("recv");
             return -1;
         }
         if (rxbuf_feed(&rx, chunk, (size_t)n) != 0)
@@ -79,7 +116,7 @@ static void show_line(const char *line, size_t len, struct msg *m)
     char             text[PROTO_LINE_BUF];
 
     if (proto_parse(line, len, m, &err) != 0) {
-        /* Ex.: um servidor que já tem tipos do M3 (EVENT, USERS...). Mostrar
+        /* Ex.: um servidor que já tem tipos do M3 (USERS, PRIV...). Mostrar
          * em bruto em vez de rebentar ou esconder. */
         printf("[servidor mandou mensagem nao suportada (%s)] %.*s\n",
                err.reason, (int)len, line);
@@ -106,29 +143,39 @@ static int send_msg(int fd, const struct msg *m)
     return 0;
 }
 
-/* Espera pela resposta a um pedido e mostra-a (um OK só se show_ok, porque
- * o OK ao NICK é mostrado como "ligado como ..."). -1 = sair. */
-static int await_reply(int fd, struct msg *reply, int show_ok)
-{
-    static char line[RX_LINE_BUF];
-    size_t      len;
-    struct proto_err err;
+/* ---- Thread de leitura -------------------------------------------------- */
 
-    memset(reply, 0, sizeof *reply);
-    int r = read_line(fd, line, &len);
-    if (r == 0) {
-        printf("[sem resposta do servidor em %d s]\n", REPLY_TIMEOUT_S);
-        return 0;
+/* Lê o socket até ao fim e mostra tudo o que chegar. Nunca escreve no socket.
+ *
+ * Se o servidor cair enquanto estamos à espera do teclado, a thread principal
+ * está presa no fgets() e não há forma portável de a interromper — por isso
+ * esta thread avisa e termina o processo. Quando somos NÓS a sair (Ctrl+D), o
+ * fecho é esperado: basta retornar e deixar o join acontecer. */
+static void *reader_thread(void *arg)
+{
+    int         fd = *(int *)arg;
+    static char line[RX_LINE_BUF];           /* 4 KB: fora da stack da thread */
+    size_t      len;
+    struct msg  m;
+
+    for (;;) {
+        int r = read_line(fd, line, &len);
+        if (r == 1) {
+            show_line(line, len, &m);
+            continue;
+        }
+        if (r == 0)
+            continue;                        /* timeout: não é fim de nada */
+        if (quitting)
+            return NULL;                     /* fim esperado: o join trata */
+
+        if (r == -2)
+            fprintf(stderr, "\n[client] o servidor fechou a ligacao\n");
+        exit(r == -2 ? EXIT_SUCCESS : EXIT_FAILURE);
     }
-    if (r == -2)
-        fprintf(stderr, "[client] o servidor fechou a ligacao\n");
-    if (r < 0)
-        return -1;
-    if (!show_ok && proto_parse(line, len, reply, &err) == 0 && reply->type == MT_OK)
-        return 0;
-    show_line(line, len, reply);
-    return 0;
 }
+
+/* ---- Arranque ----------------------------------------------------------- */
 
 /* Lê o nick do teclado, se não veio na linha de comando. */
 static int ask_nick(char *nick, size_t cap)
@@ -140,6 +187,49 @@ static int ask_nick(char *nick, size_t cap)
         return -1;
     buf[strcspn(buf, "\r\n")] = '\0';
     snprintf(nick, cap, "%s", buf);
+    return 0;
+}
+
+/* Envia o NICK e espera a resposta, AINDA em pedido-resposta.
+ *
+ * Esta fase fica síncrona de propósito: só vale a pena arrancar o chat depois
+ * de sermos aceites, e enquanto ela dura mais ninguém toca no rxbuf. O servidor
+ * garante que o OK vai à frente do EVENT (session.h), por isso a primeira
+ * linha é mesmo a resposta ao nosso NICK.
+ *
+ * Devolve 0 se fomos aceites. */
+static int do_nick(int fd, const struct msg *nick)
+{
+    static char line[RX_LINE_BUF];
+    size_t      len;
+    struct msg  reply;
+
+    if (send_msg(fd, nick) != 0)
+        return -1;
+
+    int r = read_line(fd, line, &len);
+    if (r == 0) {
+        fprintf(stderr, "[client] sem resposta do servidor em %d s\n", REPLY_TIMEOUT_S);
+        return -1;
+    }
+    if (r != 1) {
+        fprintf(stderr, "[client] o servidor fechou a ligacao\n");
+        return -1;
+    }
+
+    memset(&reply, 0, sizeof reply);
+    struct proto_err err;
+    if (proto_parse(line, len, &reply, &err) != 0) {
+        printf("[servidor mandou mensagem nao suportada (%s)] %.*s\n",
+               err.reason, (int)len, line);
+        return -1;
+    }
+    if (reply.type == MT_ERROR) {           /* nick recusado: não continuar */
+        char text[PROTO_LINE_BUF];
+        ui_format(&reply, text, sizeof text);
+        printf("%s\n", text);
+        return -1;
+    }
     return 0;
 }
 
@@ -171,24 +261,34 @@ int main(int argc, char *argv[])
     if (fd < 0)
         return EXIT_FAILURE;
 
-    /* Timeout de leitura: recv() devolve -1 com EAGAIN se nada chegar a
-     * tempo. É o que impede o pedido-resposta de ficar preso para sempre. */
+    /* Timeout SÓ para a resposta ao NICK: impede ficar preso para sempre
+     * contra um servidor que não responda. É retirado a seguir — a thread de
+     * leitura tem mesmo de ficar à espera indefinidamente. */
     struct timeval tv = { .tv_sec = REPLY_TIMEOUT_S, .tv_usec = 0 };
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
 
     rxbuf_init(&rx);
-    struct msg reply;
     int status = EXIT_FAILURE;
 
     /* 1. NICK tem de ser a primeira mensagem (slide 124). */
-    if (send_msg(fd, &nick) != 0 || await_reply(fd, &reply, 0) != 0)
+    if (do_nick(fd, &nick) != 0)
         goto out;
-    if (reply.type == MT_ERROR)             /* recusado: não vale a pena continuar */
-        goto out;
+
+    tv.tv_sec = 0;                          /* sem timeout a partir daqui */
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+
     printf("[client] ligado a %s:%s como %s (Ctrl+D para sair)\n",
            host, port, nick.nick);
 
-    /* 2. Uma linha do teclado -> um MSG -> uma resposta. */
+    /* 2. A partir daqui os dois sentidos são independentes. */
+    pthread_t reader;
+    if (pthread_create(&reader, NULL, reader_thread, &fd) != 0) {
+        fprintf(stderr, "[client] nao foi possivel criar a thread de leitura\n");
+        goto out;
+    }
+
+    /* 3. Teclado -> MSG. Sem esperar resposta: ela aparece quando chegar,
+     *    pela mão da outra thread. */
     char typed[PROTO_TEXT_MAX + 3];         /* texto + "\r\n" + '\0' */
     while (fgets(typed, sizeof typed, stdin) != NULL) {
         /* Linha maior do que o buffer: o fgets parte-a, e o resto viria como
@@ -214,21 +314,16 @@ int main(int argc, char *argv[])
 
         /* Sem eco local: o servidor devolve-nos o nosso CHAT (D5). Se o
          * imprimíssemos também, aparecia duplicado. */
-        if (send_msg(fd, &m) != 0 || await_reply(fd, &reply, 1) != 0)
-            goto out;
+        if (send_msg(fd, &m) != 0)
+            break;
     }
 
-    /* 3. EOF no teclado: fechar só o sentido de envio (FIN). O servidor vê
-     * recv()==0 e fecha também; mostramos o que ainda chegar até lá. Aqui o
-     * fecho do servidor (-2) é o fim esperado, por isso sem aviso. */
+    /* 4. EOF no teclado: fechar só o sentido de envio (FIN). O servidor vê
+     *    recv()==0 e fecha também; a thread de leitura mostra o que ainda
+     *    chegar e depois termina sozinha ao ver o fecho. */
+    quitting = 1;
     shutdown(fd, SHUT_WR);
-    for (;;) {
-        static char line[RX_LINE_BUF];
-        size_t      len;
-        if (read_line(fd, line, &len) != 1)
-            break;
-        show_line(line, len, &reply);
-    }
+    pthread_join(reader, NULL);
     status = EXIT_SUCCESS;
 
 out:
