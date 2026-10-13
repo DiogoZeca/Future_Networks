@@ -16,7 +16,15 @@ COMMON_OBJ := $(patsubst src/%.c,$(BUILD)/%.o,$(wildcard src/common/*.c))
 SERVER_OBJ := $(patsubst src/%.c,$(BUILD)/%.o,$(wildcard src/server/*.c))
 CLIENT_OBJ := $(patsubst src/%.c,$(BUILD)/%.o,$(wildcard src/client/*.c))
 
-.PHONY: all clean
+# Testes unitários. O wildcard apanha automaticamente cada test_*.c novo,
+# por isso acrescentar uma suite não exige mexer aqui.
+TEST_SRC := $(wildcard tests/unit/test_*.c)
+TEST_OBJ := $(patsubst tests/unit/%.c,$(BUILD)/tests/%.o,$(TEST_SRC))
+TEST_BIN := $(patsubst tests/unit/%.c,$(BIN)/tests/%,$(TEST_SRC))
+
+ALL_OBJ := $(COMMON_OBJ) $(SERVER_OBJ) $(CLIENT_OBJ) $(TEST_OBJ)
+
+.PHONY: all clean test
 
 all: $(BIN)/server $(BIN)/client
 
@@ -32,7 +40,28 @@ $(BUILD)/%.o: src/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
+# --- testes unitários ------------------------------------------------------
+# Código de teste é código nosso: leva as mesmas flags estritas.
+$(BUILD)/tests/%.o: tests/unit/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Itests/unit -c $< -o $@
+
+$(BIN)/tests/%: $(BUILD)/tests/%.o $(COMMON_OBJ)
+	@mkdir -p $(dir $@)
+	$(CC) $(LDFLAGS) $^ -o $@ $(LDLIBS)
+
+# Corre TODAS as suites (não pára na primeira: queremos o panorama todo) e
+# devolve != 0 se alguma falhar.
+test: $(TEST_BIN)
+	@fail=0; \
+	for t in $(TEST_BIN); do \
+	    echo "=== $$t"; \
+	    ./$$t || fail=1; \
+	done; \
+	if [ $$fail -ne 0 ]; then echo "RESULTADO: FALHOU"; exit 1; fi; \
+	echo "RESULTADO: tudo passou"
+
 clean:
 	rm -rf $(BUILD) $(BIN)
 
--include $(COMMON_OBJ:.o=.d) $(SERVER_OBJ:.o=.d) $(CLIENT_OBJ:.o=.d)
+-include $(ALL_OBJ:.o=.d)
