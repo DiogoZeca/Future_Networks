@@ -168,7 +168,15 @@ time.sleep(6.5)                                # SEND_TIMEOUT_MS = 5000
 # Duas mensagens: com o bug, a thread do rui ficava presa a meio do broadcast
 # da 1.a (na fila do wlock do lento) e a 2.a nunca chegava a ser lida.
 send(b, {"type":"MSG","text":"ainda ha alguem?"})
-send(b, {"type":"MSG","text":"segunda"}); time.sleep(0.5)
+send(b, {"type":"MSG","text":"segunda"})
+# Esperar ATE a "segunda" chegar aos dois (no maximo 10 s), e nao um tempo
+# fixo: os ~3 MB da ana ainda podem estar a ser entregues a frente dela. Com
+# 0,5 s fixos esta seccao falhava numa maquina mais lenta (uma VM) sem haver
+# bug nenhum no servidor — M3.md, nota 11.
+fim = time.time() + 10
+while time.time() < fim and not all(
+        any(m.get("text") == "segunda" for m in recebido[n]) for n in ("ana", "rui")):
+    time.sleep(0.1)
 parar.set()
 for t in ths: t.join()
 check("o lento foi desligado (os outros veem 'lento left')",

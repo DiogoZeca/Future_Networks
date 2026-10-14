@@ -9,40 +9,73 @@
 #include <time.h>
 #include <unistd.h>
 
-int tcp_listen(const char *port, int backlog)
+/* Tenta pôr um socket à escuta numa família (AF_INET6 ou AF_INET).
+ * Devolve o fd, ou -1 com o motivo em *why, sem imprimir nada: falhar em
+ * IPv6 numa máquina sem IPv6 é normal, quem chama é que decide se é erro. */
+static int listen_family(int family, const char *port, int backlog, const char **why)
 {
     struct addrinfo hints, *res, *rp;
     memset(&hints, 0, sizeof hints);
-    hints.ai_family   = AF_INET;      /* só IPv4, por agora */
+    hints.ai_family   = family;
     hints.ai_socktype = SOCK_STREAM;  /* TCP */
-    hints.ai_flags    = AI_PASSIVE;   /* host NULL => 0.0.0.0 (todas as interfaces) */
+    hints.ai_flags    = AI_PASSIVE;   /* host NULL => "::" ou 0.0.0.0 (todas as interfaces) */
 
     int rc = getaddrinfo(NULL, port, &hints, &res);
     if (rc != 0) {
-        fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(rc));
+        *why = gai_strerror(rc);      /* ex.: porta inválida */
         return -1;
     }
 
     int fd = -1;
     for (rp = res; rp != NULL; rp = rp->ai_next) {
         fd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
-        if (fd < 0)
+        if (fd < 0) {
+            *why = strerror(errno);   /* ex.: EAFNOSUPPORT sem IPv6 no kernel */
             continue;
+        }
 
         /* Sem isto, reiniciar o servidor dá "Address already in use"
-         * enquanto a ligação anterior está em TIME_WAIT. */
+         * enquanto a ligação anterior está em TIME_WAIT (slide 125). */
         int yes = 1;
         setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof yes);
+
+        /* Dual-stack: um socket IPv6 que também aceita IPv4 (os clientes
+         * IPv4 aparecem como "::ffff:a.b.c.d"). EXPLÍCITO, porque o valor
+         * por omissão varia: em Linux depende de /proc/sys/net/ipv6/
+         * bindv6only (normalmente 0), em Windows é 1 (só IPv6). */
+        if (rp->ai_family == AF_INET6) {
+            int no = 0;
+            setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &no, sizeof no);
+        }
 
         if (bind(fd, rp->ai_addr, rp->ai_addrlen) == 0 && listen(fd, backlog) == 0)
             break; /* sucesso */
 
-        perror("bind/listen");
+        *why = strerror(errno);       /* ex.: EADDRINUSE */
         close(fd);
         fd = -1;
     }
     freeaddrinfo(res);
     return fd;
+}
+
+int tcp_listen(const char *port, int backlog)
+{
+    /* Slide 85: "Use getaddrinfo() and sockaddr_storage for IPv4 / IPv6
+     * portability". Primeiro IPv6 dual-stack (aceita as duas famílias num só
+     * socket); se a máquina não tiver IPv6, IPv4 sozinho, como até ao M3. */
+    const char *why6 = "?", *why4 = "?";
+    int fd = listen_family(AF_INET6, port, backlog, &why6);
+    if (fd >= 0)
+        return fd;
+
+    fd = listen_family(AF_INET, port, backlog, &why4);
+    if (fd >= 0) {
+        fprintf(stderr, "[net] sem IPv6 (%s): a escutar so em IPv4\n", why6);
+        return fd;
+    }
+    fprintf(stderr, "listen na porta %s: %s\n", port, why4);
+    return -1;
 }
 
 int tcp_connect(const char *host, const char *port)
@@ -161,6 +194,7 @@ void addr_to_str(const struct sockaddr *sa, char *out, size_t outlen)
 {
     char ip[INET6_ADDRSTRLEN] = "?";
     unsigned port = 0;
+    int v6 = 0;
 
     if (sa->sa_family == AF_INET) {
         const struct sockaddr_in *a = (const struct sockaddr_in *)sa;
@@ -168,8 +202,17 @@ void addr_to_str(const struct sockaddr *sa, char *out, size_t outlen)
         port = ntohs(a->sin_port);
     } else if (sa->sa_family == AF_INET6) {
         const struct sockaddr_in6 *a = (const struct sockaddr_in6 *)sa;
-        inet_ntop(AF_INET6, &a->sin6_addr, ip, sizeof ip);
         port = ntohs(a->sin6_port);
+        if (IN6_IS_ADDR_V4MAPPED(&a->sin6_addr)) {
+            /* Um cliente IPv4 num socket dual-stack chega como
+             * ::ffff:a.b.c.d. Nos logs mostra-se como o IPv4 que é. */
+            inet_ntop(AF_INET, &a->sin6_addr.s6_addr[12], ip, sizeof ip);
+        } else {
+            inet_ntop(AF_INET6, &a->sin6_addr, ip, sizeof ip);
+            v6 = 1;
+        }
     }
-    snprintf(out, outlen, "%s:%u", ip, port);
+    /* IPv6 entre parênteses retos ("[::1]:5000"), como num URL: senão os
+     * ':' do endereço confundem-se com o da porta. */
+    snprintf(out, outlen, v6 ? "[%s]:%u" : "%s:%u", ip, port);
 }

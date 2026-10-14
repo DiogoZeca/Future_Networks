@@ -52,7 +52,7 @@ Observada em 2026-10-13 (detalhe em `milestones/M2.md`, P12 e P18):
 
 ## 0.3 Evidência medida no M3
 
-Observada em 2026-10-14 (detalhe em `milestones/M3.md`, P20–P22):
+Observada em 2026-10-14 (detalhe em `milestones/M3.md`, P20–P22 e P28–P29):
 
 | Experiência | Com o bug (mutação) | Versão final |
 |---|---|---|
@@ -61,6 +61,8 @@ Observada em 2026-10-14 (detalhe em `milestones/M3.md`, P20–P22):
 | 1500 `PRIV` para um cliente que entra e sai sem parar | `find` sem refcount: ASan **heap-use-after-free**, o servidor cai | só cópias ou 404; servidor vivo |
 | `USERS` com 64 nicks de 32 bytes | com `"` nos nicks seriam 4315 bytes (> 4096) | 2266 bytes + `\n` |
 | `probe_m2.py` + `probe_m3.py` com ThreadSanitizer | — | zero avisos |
+| `interop.py` contra o mesmo servidor em `127.0.0.1` e em `::1` | antes do M3: só IPv4 | 36/36 nas duas famílias |
+| `probe_m2.py` §7 numa máquina mais lenta (VM) | espera fixa de 0,5 s: falha sem bug no servidor (também com o código do M2) | espera até a mensagem chegar: passa |
 
 ---
 
@@ -203,7 +205,7 @@ desligar?"*. São quatro cenários distintos, com sintomas diferentes.
 - **Como evitar:** uma de duas, mas decidir explicitamente:
   - declarar **"IPv4 apenas"** no `PROTOCOL.md` (mais simples, e suficiente para uma LAN); ou
   - escutar em `AF_INET6` com `IPV6_V6ONLY=0` (dual-stack). Atenção: no Windows o `IPV6_V6ONLY` vem a **1** por omissão, ao contrário de muitos Linux - se um grupo fizer isto em Windows sem desligar a opção, perde os clientes IPv4.
-- **Estado:** funciona, mas por acidente. **Proposta** no `PROTOCOL.md` v0.2 §1: IPv4 apenas (por acordar com os outros grupos).
+- **Estado:** `Resolvido` - **M3**: dual-stack, como o slide 85 recomenda (*"Use getaddrinfo() and sockaddr_storage for IPv4 / IPv6 portability"*). O `tcp_listen()` tenta primeiro `AF_INET6` com `IPV6_V6ONLY=0` posto **explicitamente** (o valor por omissão varia entre sistemas) e, numa máquina sem IPv6, cai para `AF_INET`. Os clientes IPv4 aparecem nos logs como IPv4 (`addr_to_str()` desembrulha o `::ffff:a.b.c.d`). Prova: `test_net` #76–#77; `interop.py` 36/36 em `127.0.0.1` **e** em `::1` contra o mesmo servidor. Deixou de ser uma decisão a acordar (`DECISIONS.md`, S14).
 
 ### 4.4 NAT e endereços privados
 

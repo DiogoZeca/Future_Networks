@@ -2,13 +2,15 @@
 
 Shared specification for interoperability between groups (IF 2026/27).
 Message names and fields come from the course slides (slide 124) and are
-**fixed**. Everything marked **PROPOSAL** is our group's position, already
-implemented in our server and client, but **not yet agreed** with the other
-groups — it is open for discussion and will be revised after the interop tests.
-This version becomes **v1.0** once the proposals are agreed.
+**fixed**. Rules marked **(slides)** are also fixed by the slides (slides 85,
+123–125) and need no agreement. Everything marked **PROPOSAL** is our group's
+position, already implemented in our server and client, but **not yet agreed**
+with the other groups — it is open for discussion and will be revised after the
+interop tests. This version becomes **v1.0** once the proposals are agreed.
 
-The list of every point that needs agreement, with alternatives and what breaks
-if two groups decide differently, is in [`DECISIONS.md`](DECISIONS.md).
+What is fixed by the slides, what really needs agreement (only a handful of
+points), and what breaks if two groups decide differently: see
+[`DECISIONS.md`](DECISIONS.md).
 
 Conformance scenarios: [`tests/interop/`](../tests/interop/) — plain text, run
 against any server with `python3 scripts/interop.py <host> <port>`.
@@ -16,13 +18,16 @@ against any server with `python3 scripts/interop.py <host> <port>`.
 ## 1. Transport
 
 - TCP. Default port: **PROPOSAL** `5000`.
-- **PROPOSAL:** IPv4. Our server listens on `0.0.0.0` (IPv4 only); clients
-  should connect over IPv4 (a client that resolves a hostname to an IPv6 address
-  first must fall back to IPv4).
+- **(slides, slide 85)** IPv4 and IPv6: *"Use getaddrinfo() and
+  sockaddr_storage for IPv4 / IPv6 portability"*. Our server listens on both
+  in a single dual-stack socket (`::` with `IPV6_V6ONLY=0`; on a machine
+  without IPv6 it falls back to `0.0.0.0`). Clients should try every address
+  `getaddrinfo()` returns (*"Retry another candidate"*), as ours does.
 
 ## 2. Framing
 
-- One JSON object per line, UTF-8 encoded, terminated by `\n` (0x0A).
+- **(slides, slide 123)** One JSON object per line ("newline-delimited JSON"),
+  UTF-8 encoded, terminated by `\n` (0x0A).
 - Senders MUST send `\n`; receivers MUST also accept `\r\n` (one `\r` removed).
 - No pretty-printing: a message never contains a literal newline. (JSON escapes
   newlines inside strings as `\n`, so a delimiter is safe without extra escaping.)
@@ -100,6 +105,14 @@ General rules:
 
 ## 4. Semantics
 
+**Fixed by the slides (slides 123–124):** `NICK` must be the first message;
+nicks are unique and a taken nick gets `ERROR 409 "nick taken"`; `OK` means
+"last request accepted" (so an accepted `NICK` gets `OK`); `USERS` is the
+reply to `LIST`; `ERROR` means "request refused"; a private message arrives as
+a `CHAT` with `"private":true`; `EVENT` carries join and leave notices
+(`"rui joined"`); `QUIT` is how a client leaves cleanly. Everything else in this
+section is **PROPOSAL**.
+
 Rule of thumb for requests (**PROPOSAL**): **every request gets exactly one
 direct answer** — either the success answer below or an `ERROR`.
 
@@ -165,11 +178,14 @@ Errors never change the state (except `line too long`, which closes).
 | 400 | `line too long` | line over the maximum length; server then closes | PROPOSAL |
 | 401 | `nick required` | `MSG`, `PRIV` or `LIST` before a successful `NICK` | PROPOSAL |
 | 404 | `no such nick` | `PRIV` to a nick that is not in the chat | PROPOSAL |
-| 409 | `nick taken` | `NICK` already in use (case-insensitive) | **code and reason from the slides** |
+| 409 | `nick taken` | `NICK` already in use (case-insensitive) | **slides** (code and reason) |
 | 503 | `server full` | no room for another client; the server closes after sending it | PROPOSAL |
 
 Clients should rely on the **code**; the reason is human-readable text and may
 differ between implementations (our conformance scenarios compare codes only).
+Only 409 changes what a client does (try another nick); the other codes are
+shown to the user, so a different choice by another group changes what the
+user reads but breaks nothing.
 The codes follow the HTTP meanings (400 Bad Request, 401 Unauthorized,
 404 Not Found, 409 Conflict, 503 Service Unavailable).
 
@@ -266,6 +282,8 @@ Line too long — the server closes after the error:
   `OK` + close, also before `NICK`; nicks may no longer contain `"` or `\`
   (worst-case `USERS` must fit in a line), looser rule when receiving; state
   diagram (§4.1); example sessions for M3; [`DECISIONS.md`](DECISIONS.md).
+  Following the slides: IPv4 **and** IPv6 (slide 85) instead of IPv4 only;
+  rules fixed by the slides are marked as such and need no agreement.
 - v0.4 — M2 review: the first line after `NICK` is now guaranteed to be its
   answer (the client joins the chat only after the `OK`); a client that does not
   read for 5 s is disconnected; `ERROR 503 "server full"`; fixed the list of

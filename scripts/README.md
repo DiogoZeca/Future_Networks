@@ -72,6 +72,11 @@ existiu (`docs/milestones/M2.md`, "Revisão do M2"). O log do servidor vai para
 um ficheiro temporário e não para um pipe — um pipe que ninguém lê enche e
 **para o servidor** (nota 6 do M2.md).
 
+No M3 a §7 deixou de esperar um tempo fixo (0,5 s) pela última mensagem e
+passou a esperar **até ela chegar** (no máximo 10 s): numa máquina mais lenta
+os ~3 MB ainda estavam a ser entregues e a secção falhava sem haver bug no
+servidor (nota 11 do `M3.md`).
+
 ---
 
 ## `probe_m3.py`

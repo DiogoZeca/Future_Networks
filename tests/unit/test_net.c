@@ -11,11 +11,20 @@
  *   55  o prazo é TOTAL, não por send(): um leitor lento não o prolonga
  *   56  o outro lado fechou: -1 (EPIPE), e o processo não morre com SIGPIPE
  *   57  depois de expirar pode ter saído MEIA mensagem (typical-problems §1.3)
+ *
+ * M3 (slide 85, "Use getaddrinfo() and sockaddr_storage for IPv4 / IPv6
+ * portability"):
+ *   76  addr_to_str(): IPv4, IPv6 e IPv4 que chega por um socket dual-stack
+ *   77  tcp_listen() aceita IPv4 E IPv6 no mesmo socket — com ligações reais
+ *       em 127.0.0.1 e em ::1. Numa máquina sem IPv6 verifica o recurso a
+ *       IPv4 e diz que saltou a parte IPv6.
  */
 #include "net.h"
 #include "test_util.h"
 
+#include <arpa/inet.h>
 #include <errno.h>
+#include <netinet/in.h>
 #include <pthread.h>
 #include <stdlib.h>
 #include <sys/socket.h>
@@ -172,6 +181,83 @@ static void caso_57_meia_mensagem(void)
     close(sv[1]);
 }
 
+/* ---- M3: IPv4 + IPv6 ------------------------------------------------------ */
+
+static void caso_76_addr_to_str(void)
+{
+    char out[64];
+
+    CASE(76, "IPv4: a.b.c.d:porta");
+    struct sockaddr_in a4 = { .sin_family = AF_INET, .sin_port = htons(5000) };
+    inet_pton(AF_INET, "192.168.1.7", &a4.sin_addr);
+    addr_to_str((struct sockaddr *)&a4, out, sizeof out);
+    CHECK_STR(out, "192.168.1.7:5000");
+
+    CASE(76, "IPv6: [endereco]:porta (os ':' nao se confundem com a porta)");
+    struct sockaddr_in6 a6 = { .sin6_family = AF_INET6, .sin6_port = htons(5000) };
+    inet_pton(AF_INET6, "::1", &a6.sin6_addr);
+    addr_to_str((struct sockaddr *)&a6, out, sizeof out);
+    CHECK_STR(out, "[::1]:5000");
+
+    CASE(76, "IPv4 num socket dual-stack (::ffff:a.b.c.d) mostra-se como IPv4");
+    inet_pton(AF_INET6, "::ffff:10.0.0.2", &a6.sin6_addr);
+    addr_to_str((struct sockaddr *)&a6, out, sizeof out);
+    CHECK_STR(out, "10.0.0.2:5000");
+}
+
+/* Liga a host:port do listener, aceita e devolve o "who" do lado do servidor
+ * (o que o servidor escreve nos logs). "" se não ligou. */
+static void liga_e_aceita(int lfd, const char *host, const char *port, char *who, size_t cap)
+{
+    who[0] = '\0';
+    int c = tcp_connect(host, port);
+    if (c < 0)
+        return;
+    struct sockaddr_storage peer;
+    socklen_t len = sizeof peer;
+    int s = accept(lfd, (struct sockaddr *)&peer, &len);
+    if (s >= 0) {
+        addr_to_str((struct sockaddr *)&peer, who, cap);
+        close(s);
+    }
+    close(c);
+}
+
+static void caso_77_dual_stack(void)
+{
+    /* Porta "0": o kernel escolhe uma livre, para o teste nunca colidir com
+     * um servidor que esteja a correr. */
+    int lfd = tcp_listen("0", 4);
+    CASE(77, "tcp_listen(\"0\") cria o socket");
+    CHECK(lfd >= 0);
+    if (lfd < 0)
+        return;
+
+    struct sockaddr_storage me;
+    socklen_t len = sizeof me;
+    getsockname(lfd, (struct sockaddr *)&me, &len);
+    unsigned p = me.ss_family == AF_INET6
+               ? ntohs(((struct sockaddr_in6 *)&me)->sin6_port)
+               : ntohs(((struct sockaddr_in *)&me)->sin_port);
+    char port[8], who[64];
+    snprintf(port, sizeof port, "%u", p);
+
+    CASE(77, "um cliente IPv4 (127.0.0.1) liga, e aparece como 127.0.0.1");
+    liga_e_aceita(lfd, "127.0.0.1", port, who, sizeof who);
+    CHECK(strncmp(who, "127.0.0.1:", 10) == 0);
+
+    if (me.ss_family == AF_INET6) {
+        CASE(77, "o MESMO socket aceita um cliente IPv6 (::1), mostrado como [::1]");
+        liga_e_aceita(lfd, "::1", port, who, sizeof who);
+        CHECK(strncmp(who, "[::1]:", 6) == 0);
+    } else {
+        /* Máquina sem IPv6 (ex.: alguns contentores): o recurso a IPv4 é o
+         * comportamento certo. Diz-se em vez de falhar ou fingir que passou. */
+        printf("  (sem IPv6 nesta maquina: tcp_listen caiu para IPv4; parte IPv6 saltada)\n");
+    }
+    close(lfd);
+}
+
 int main(void)
 {
     caso_53_normal();
@@ -179,5 +265,7 @@ int main(void)
     caso_55_prazo_total();
     caso_56_peer_fechou();
     caso_57_meia_mensagem();
+    caso_76_addr_to_str();
+    caso_77_dual_stack();
     return t_report("net");
 }
