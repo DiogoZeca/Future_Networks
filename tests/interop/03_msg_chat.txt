@@ -1,5 +1,7 @@
-# MSG -> o emissor recebe o seu proprio CHAT (D5)
+# MSG -> OK (D13: "last request accepted") e depois o emissor recebe o seu
+# proprio CHAT (D5). Acordado com o primeiro grupo; o OK vem sempre antes.
 > {"type":"NICK","nick":"ana"}
 < {"type":"OK"}
 > {"type":"MSG","text":"hello"}
+< {"type":"OK"}
 < {"type":"CHAT","from":"ana","text":"hello","private":false}

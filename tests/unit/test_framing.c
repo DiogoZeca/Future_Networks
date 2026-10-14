@@ -9,6 +9,11 @@
  * Numeração: casos 1-10 vêm da tabela em docs/milestones/M1.md; 19-22 foram
  * acrescentados na revisão do plano; 23-24 nasceram de testes de mutação
  * (bugs introduzidos de propósito que nenhum dos outros apanhava).
+ * 78-80 são do M3: o modo tolerante do cliente (rxbuf_init_lenient), que
+ * descarta uma linha longa vinda de um servidor em vez de fechar.
+ *
+ * Desde o M3 a linha máxima é 64 KiB (RX_MAX_LINE). Os casos usam a macro, por
+ * isso continuam a testar a fronteira certa sem mudar.
  *
  * Foram escritos ANTES da implementação (commit 70e7fa6, contra stubs): são
  * eles que definem o contrato.
@@ -124,12 +129,14 @@ static void caso_5_crlf(void)
  *    confirma que nao houve escrita fora de data[RX_CAP]. */
 static void caso_6_linha_gigante(void)
 {
-    CASE(6, "5000 bytes sem '\\n' -> RX_TOOLONG, sem overflow");
+    /* Era "5000 bytes" quando a linha maxima era 4096 (M1/M2). Com os 64 KiB
+     * do M3 passou a RX_MAX_LINE + 904: o mesmo "um pouco acima do limite". */
+    CASE(6, "RX_MAX_LINE+904 bytes sem '\\n' -> RX_TOOLONG, sem overflow");
     size_t len = 0;
 
     rxbuf_init(&rx);
-    memset(big, 'A', 5000);
-    CHECK_INT(rxbuf_feed(&rx, big, 5000), 0);         /* cabe em RX_CAP */
+    memset(big, 'A', RX_MAX_LINE + 904);
+    CHECK_INT(rxbuf_feed(&rx, big, RX_MAX_LINE + 904), 0);  /* cabe em RX_CAP */
     CHECK_INT(rxbuf_next_line(&rx, line, sizeof line, &len), RX_TOOLONG);
     CHECK_INT(rxbuf_failed(&rx), 1);                  /* envenenado */
     CHECK_INT(rxbuf_pending(&rx), 0);                 /* e esvaziado */
@@ -195,8 +202,8 @@ static void caso_10_depois_do_erro(void)
     size_t len = 0;
 
     rxbuf_init(&rx);
-    memset(big, 'C', 5000);
-    CHECK_INT(rxbuf_feed(&rx, big, 5000), 0);
+    memset(big, 'C', RX_MAX_LINE + 904);              /* era 5000 (ver #6) */
+    CHECK_INT(rxbuf_feed(&rx, big, RX_MAX_LINE + 904), 0);
     CHECK_INT(rxbuf_next_line(&rx, line, sizeof line, &len), RX_TOOLONG);
 
     CHECK_INT(rxbuf_failed(&rx), 1);
@@ -329,6 +336,112 @@ static void caso_24_duas_byte_a_byte(void)
 
 /* ------------------------------------------------------------------------ */
 
+
+/* ---- M3: modo tolerante (cliente) --------------------------------------- */
+
+/* 78. Uma linha longa que chega INTEIRA num feed (com o '\n'): é tirada, e a
+ *     linha que vinha colada a seguir sobrevive. */
+static void caso_78_tolerante_linha_inteira(void)
+{
+    static char in[RX_MAX_LINE + 64];
+    size_t len = 0;
+
+    CASE(78, "modo tolerante: linha > RX_MAX_LINE com '\\n' -> RX_SKIPPED, a seguinte fica");
+    rxbuf_init_lenient(&rx);
+    /* RX_MAX_LINE de 'x' + '\n' = RX_MAX_LINE + 1: um a mais do que o limite.
+     * Vai em pedaços de RX_CHUNK (a disciplina do recv), e o "{ok}\n" no fim. */
+    memset(in, 'x', RX_MAX_LINE);
+    in[RX_MAX_LINE] = '\n';
+    memcpy(in + RX_MAX_LINE + 1, "{ok}\n", 5);
+    size_t total = RX_MAX_LINE + 6, off = 0;
+    int skipped = 0, got_ok = 0;
+    while (off < total) {
+        size_t n = total - off < RX_CHUNK ? total - off : RX_CHUNK;
+        CHECK_INT(rxbuf_feed(&rx, in + off, n), 0);
+        off += n;
+        int r;
+        while ((r = rxbuf_next_line(&rx, line, sizeof line, &len)) != RX_NEED) {
+            if (r == RX_SKIPPED) skipped++;
+            else if (r == RX_LINE && strcmp(line, "{ok}") == 0) got_ok++;
+            else { CHECK(0); break; }
+        }
+    }
+    CHECK_INT(skipped, 1);
+    CHECK_INT(got_ok, 1);
+    CHECK_INT(rxbuf_failed(&rx), 0);
+
+    /* O outro caminho: o resto da linha (com o '\n') e a mensagem seguinte
+     * chegam no MESMO feed, quando o buffer ainda nao tinha chegado ao limite.
+     * A mutacao "deitar tudo fora" passava no caso de cima e falha aqui. */
+    CASE(78, "linha longa + '\\n' + mensagem seguinte no mesmo feed: a seguinte fica");
+    rxbuf_init_lenient(&rx);
+    size_t fed = 0, target = RX_MAX_LINE - 50;        /* fica abaixo do limite */
+    memset(big, 'x', RX_CHUNK);
+    while (fed < target) {
+        size_t n = target - fed < RX_CHUNK ? target - fed : RX_CHUNK;
+        CHECK_INT(rxbuf_feed(&rx, big, n), 0);
+        CHECK_INT(rxbuf_next_line(&rx, line, sizeof line, &len), RX_NEED);
+        fed += n;
+    }
+    size_t rest = RX_MAX_LINE + 100 - fed;             /* a linha passa o limite */
+    memset(big, 'x', rest);
+    memcpy(big + rest, "\n{ok}\n", 6);
+    CHECK(rest + 6 <= RX_CHUNK);
+    CHECK_INT(rxbuf_feed(&rx, big, rest + 6), 0);
+    CHECK_INT(rxbuf_next_line(&rx, line, sizeof line, &len), RX_SKIPPED);
+    CHECK_INT(rxbuf_next_line(&rx, line, sizeof line, &len), RX_LINE);
+    CHECK_STR(line, "{ok}");
+}
+
+/* 79. O caso que o servidor apanha cedo (RX_MAX_LINE bytes sem '\n'): o
+ *     tolerante passa a "descartar até ao '\n'", mesmo que este venha muitos
+ *     feeds depois, e volta ao normal. */
+static void caso_79_tolerante_sem_newline(void)
+{
+    size_t len = 0;
+
+    CASE(79, "modo tolerante: RX_MAX_LINE sem '\\n' -> RX_SKIPPED, descarta ate ao '\\n'");
+    rxbuf_init_lenient(&rx);
+    memset(big, 'y', RX_CHUNK);
+    int skipped = 0;
+    for (size_t sent = 0; sent < RX_MAX_LINE + 3 * RX_CHUNK; sent += RX_CHUNK) {
+        CHECK_INT(rxbuf_feed(&rx, big, RX_CHUNK), 0);
+        int r;
+        while ((r = rxbuf_next_line(&rx, line, sizeof line, &len)) != RX_NEED) {
+            CHECK_INT(r, RX_SKIPPED);
+            skipped++;
+        }
+    }
+    CHECK_INT(skipped, 1);                         /* avisa UMA vez, nao a cada feed */
+    CHECK(rxbuf_pending(&rx) < RX_CHUNK);          /* o lixo nao se acumula */
+
+    CASE(79, "o fim da linha longa e a mensagem seguinte no mesmo feed");
+    const char *fim = "yyy\n{\"b\":2}\n";
+    CHECK_INT(rxbuf_feed(&rx, fim, strlen(fim)), 0);
+    CHECK_INT(rxbuf_next_line(&rx, line, sizeof line, &len), RX_LINE);
+    CHECK_STR(line, "{\"b\":2}");
+    CHECK_INT(rxbuf_next_line(&rx, line, sizeof line, &len), RX_NEED);
+}
+
+/* 80. O modo normal (servidor) nao mudou: continua a envenenar (D2). E o init
+ *     normal desliga o tolerante. */
+static void caso_80_normal_continua_estrito(void)
+{
+    size_t len = 0;
+
+    CASE(80, "rxbuf_init depois de lenient volta a ser estrito: RX_TOOLONG");
+    rxbuf_init_lenient(&rx);
+    rxbuf_init(&rx);
+    memset(big, 'z', RX_MAX_LINE);
+    CHECK_INT(rxbuf_feed(&rx, big, RX_CHUNK), 0);
+    for (size_t sent = RX_CHUNK; sent < RX_MAX_LINE; sent += RX_CHUNK) {
+        CHECK_INT(rxbuf_next_line(&rx, line, sizeof line, &len), RX_NEED);
+        CHECK_INT(rxbuf_feed(&rx, big, RX_CHUNK), 0);
+    }
+    CHECK_INT(rxbuf_next_line(&rx, line, sizeof line, &len), RX_TOOLONG);
+    CHECK_INT(rxbuf_failed(&rx), 1);
+}
+
 int main(void)
 {
     caso_1_de_uma_vez();
@@ -347,5 +460,8 @@ int main(void)
     caso_22_pior_caso_capacidade();
     caso_23_limite_sem_newline();
     caso_24_duas_byte_a_byte();
+    caso_78_tolerante_linha_inteira();
+    caso_79_tolerante_sem_newline();
+    caso_80_normal_continua_estrito();
     return t_report("framing");
 }

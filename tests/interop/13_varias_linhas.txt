@@ -1,0 +1,10 @@
+# Mensagens de varias linhas (revisao do M3): o '\n' vai escapado no JSON,
+# por isso a linha continua a ser UMA. Tab tambem passa.
+> {"type":"NICK","nick":"ana"}
+< {"type":"OK"}
+> {"type":"MSG","text":"linha 1\nlinha 2\tcom tab"}
+< {"type":"OK"}
+< {"type":"CHAT","from":"ana","text":"linha 1\nlinha 2\tcom tab"}
+# text vazio continua proibido
+> {"type":"MSG","text":""}
+< {"type":"ERROR","code":400}

@@ -2,7 +2,9 @@
  * test_ui.c — testes da parte pura do cliente (include/ui.h).
  *
  * Numeração: 40-47, a seguir aos da session (M1/M2); 71-75 com os comandos
- * e o USERS (M3).
+ * e o USERS (M3); 84 da revisão do M3 (mostrar várias linhas sem deixar um
+ * '\033' mexer no terminal, e o que o protocolo cortou). O 43 mudou: o tab
+ * passou a ser texto válido.
  */
 #include "ui.h"
 #include "test_util.h"
@@ -61,14 +63,14 @@ static void caso_42_limite(void)
     CHECK_INT(m.type, 0);
 }
 
-/* 43. Caracteres de controlo: recusados com motivo, antes de chegar ao fio. */
+/* 43. Caracteres de controlo. Ate a revisao do M3 eram recusados ("a\tb"
+ *     dava -1); desde que o text aceita varias linhas, sao texto valido. */
 static void caso_43_controlo(void)
 {
-    CASE(43, "tab -> -1 'caracteres de controlo'");
+    CASE(43, "tab e aceite (revisao do M3: o text pode ter controlo)");
     why = NULL;
-    CHECK_INT(ui_input_to_msg("a\tb\n", &m, &why), -1);
-    CHECK_STR(why, UI_WHY_CONTROL);
-    CHECK_INT(m.type, 0);
+    CHECK_INT(ui_input_to_msg("a\tb\n", &m, &why), 1);
+    CHECK_STR(m.text, "a\tb");
 
     CASE(43, "o que passa no ui passa no encode (mesmas regras)");
     CHECK_INT(ui_input_to_msg("diz \"oi\" \\\n", &m, &why), 1);
@@ -222,16 +224,16 @@ static void caso_72_msg(void)
     CHECK_INT(ui_input_to_msg("/msg 123456789012345678901234567890123 oi\n", &m, &why), UI_BAD);
     CHECK_STR(why, UI_WHY_BADNICK);
 
-    CASE(72, "texto com controlo ou longo demais -> o mesmo motivo do MSG");
-    CHECK_INT(ui_input_to_msg("/msg rui a\tb\n", &m, &why), UI_BAD);
-    CHECK_STR(why, UI_WHY_CONTROL);
+    CASE(72, "texto com tab passa; longo demais -> o mesmo motivo do MSG");
+    CHECK_INT(ui_input_to_msg("/msg rui a\tb\n", &m, &why), UI_SEND);
+    CHECK_STR(m.text, "a\tb");
     static char longo[PROTO_TEXT_MAX + 32];
     strcpy(longo, "/msg rui ");
     memset(longo + 9, 'x', PROTO_TEXT_MAX + 1);
     longo[9 + PROTO_TEXT_MAX + 1] = '\0';
     CHECK_INT(ui_input_to_msg(longo, &m, &why), UI_BAD);
     CHECK_STR(why, UI_WHY_TOOLONG);
-    longo[9 + PROTO_TEXT_MAX] = '\0';                /* exatamente 1024: passa */
+    longo[9 + PROTO_TEXT_MAX] = '\0';                /* exatamente 4096: passa */
     CHECK_INT(ui_input_to_msg(longo, &m, &why), UI_SEND);
 }
 
@@ -293,6 +295,56 @@ static void caso_75_users(void)
     CHECK(strcmp(shown, "[?]") != 0);
 }
 
+
+/* 84. Revisao do M3: mostrar texto de varias linhas e o que vem de outros
+ *     servidores, sem deixar caracteres de controlo mexer no terminal. */
+static void caso_84_mostrar_em_seguranca(void)
+{
+    struct msg c = { .type = MT_CHAT, .from = "ana" };
+
+    CASE(84, "varias linhas: as seguintes aparecem indentadas");
+    strcpy(c.text, "linha 1\nlinha 2");
+    ui_format(&c, shown, sizeof shown);
+    CHECK_STR(shown, "<ana> linha 1\n    linha 2");
+
+    CASE(84, "'\\033' (cores, apagar o ecra) e '\\r' (escrever por cima) viram '?'");
+    strcpy(c.text, "a\033[2Jb\rc\x7f");
+    ui_format(&c, shown, sizeof shown);
+    CHECK_STR(shown, "<ana> a?[2Jb?c?");
+
+    CASE(84, "o tab e o UTF-8 ficam");
+    strcpy(c.text, "ol\xC3\xA1\tmundo");
+    ui_format(&c, shown, sizeof shown);
+    CHECK_STR(shown, "<ana> ol\xC3\xA1\tmundo");
+
+    CASE(84, "um EVENT e um reason tambem sao limpos");
+    struct msg e = { .type = MT_EVENT, .text = "x\033y" };
+    ui_format(&e, shown, sizeof shown);
+    CHECK_STR(shown, "* x?y");
+    struct msg r = { .type = MT_ERROR, .code = 400, .reason = "a\nb" };
+    ui_format(&r, shown, sizeof shown);
+    CHECK_STR(shown, "[erro 400] a\n    b");
+
+    CASE(84, "o que o protocolo cortou acaba em [...]");
+    strcpy(c.text, "muito texto");
+    c.truncated = 1;
+    ui_format(&c, shown, sizeof shown);
+    CHECK_STR(shown, "<ana> muito texto [...]");
+
+    CASE(84, "um buffer pequeno continua a truncar sem escrever fora, mesmo com '\\n'");
+    char small[12];
+    strcpy(c.text, "a\nb\nc\nd\ne\nf");
+    c.truncated = 0;
+    ui_format(&c, small, sizeof small);
+    CHECK_INT(strlen(small), sizeof small - 1);
+
+    CASE(84, "o eco local do /msg (m->to preenchido)");
+    struct msg echo = { .type = MT_CHAT, .from = "ana", .to = "rui", .is_private = 1,
+                        .text = "ola\nrui" };
+    ui_format(&echo, shown, sizeof shown);
+    CHECK_STR(shown, "<ana -> rui> (privado) ola\n    rui");
+}
+
 int main(void)
 {
     caso_40_linha_normal();
@@ -308,5 +360,6 @@ int main(void)
     caso_73_outros();
     caso_74_privado();
     caso_75_users();
+    caso_84_mostrar_em_seguranca();
     return t_report("ui");
 }

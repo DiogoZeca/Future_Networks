@@ -267,9 +267,12 @@ static void serve(struct client *c, struct session *sess)
                 break;
 
             if (r == RX_TOOLONG) {              /* culpa DELES (D1/D2) */
+                /* 413 e não 400 (revisão do M3, acordado com o primeiro
+                 * grupo): 413 = "a ligação não está em condições e é
+                 * fechada"; 400 = "pedido recusado, continua". */
                 struct sess_out e = { .dest = SESS_SELF };
                 e.msg.type = MT_ERROR;
-                e.msg.code = 400;
+                e.msg.code = 413;
                 snprintf(e.msg.reason, sizeof e.msg.reason, "%s", SESS_R_TOOLONG);
                 deliver(c, &e);
                 /* Fechar sem ressincronizar (D2). Atenção: se ainda houver

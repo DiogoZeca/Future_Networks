@@ -58,10 +58,12 @@ Observada em 2026-10-14 (detalhe em `milestones/M3.md`, P20–P22 e P28–P29):
 |---|---|---|
 | 16 threads pedem o mesmo nick no mesmo instante, 200 rondas | verificar e reservar em 2 locks: **36** rondas acabam com mais do que uma "ana" | 0 |
 | 50 rondas de 8 clientes reais com o mesmo `NICK` | — | sempre 1 `OK` e 7 × `409` |
-| 1500 `PRIV` para um cliente que entra e sai sem parar | `find` sem refcount: ASan **heap-use-after-free**, o servidor cai | só cópias ou 404; servidor vivo |
+| 1500 `PRIV` para um cliente que entra e sai sem parar | `find` sem refcount: ASan **heap-use-after-free**, o servidor cai | só `OK` ou 404; servidor vivo |
 | `USERS` com 64 nicks de 32 bytes | com `"` nos nicks seriam 4315 bytes (> 4096) | 2266 bytes + `\n` |
 | `probe_m2.py` + `probe_m3.py` com ThreadSanitizer | — | zero avisos |
-| `interop.py` contra o mesmo servidor em `127.0.0.1` e em `::1` | antes do M3: só IPv4 | 36/36 nas duas famílias |
+| `interop.py` contra o mesmo servidor em `127.0.0.1` e em `::1` | antes do M3: só IPv4 | 42/42 nas duas famílias |
+| `interop.py` 12 vezes seguidas (todos os cenários usam o nick "ana") | **2 execuções** com um `409` falso: o cenário seguinte pedia "ana" antes de o servidor dar pela saída do anterior | fechar com FIN e esperar pelo servidor: 15/15 |
+| Linha de 64 KiB + 1 byte | — | `ERROR 413` e fecho; de vez em quando o RST engole o 413 (2.2, M4) |
 | `probe_m2.py` §7 numa máquina mais lenta (VM) | espera fixa de 0,5 s: falha sem bug no servidor (também com o código do M2) | espera até a mensagem chegar: passa |
 
 ---
@@ -94,8 +96,8 @@ Observada em 2026-10-14 (detalhe em `milestones/M3.md`, P20–P22 e P28–P29):
 
 - **Sintoma:** buffer overflow, ou mensagens silenciosamente perdidas.
 - **Porquê:** um peer malicioso ou com bug envia 1 MB sem nenhum `\n`. Um buffer de receção fixo enche e não há linha para extrair.
-- **Como evitar:** limite explícito acordado na spec (proposta: 4096 bytes incl. `\n`) e, ao ser excedido, responder `ERROR 400` e fechar. **Nunca** truncar em silêncio e continuar a ler - os bytes restantes seriam interpretados como uma mensagem nova.
-- **Estado:** `Resolvido` - **M1**. `RX_CAP = RX_MAX_LINE + RX_CHUNK = 8192` (sobra até 4095 + `recv()` até 4096 = 8191), garantido por `_Static_assert`; linha > 4096 → `ERROR 400 "line too long"` e fecho, sem ressincronizar (D1/D2). Provas: #6 (com ASan), #7, #21, #22, #23. Ver M1.md, P3.
+- **Como evitar:** limite explícito acordado na spec e, ao ser excedido, responder com um `ERROR` e fechar. **Nunca** truncar em silêncio e continuar a ler - os bytes restantes seriam interpretados como uma mensagem nova (no servidor; no cliente, que lê de um servidor que manda linhas completas, descartar até ao `\n` seguinte é seguro).
+- **Estado:** `Resolvido` - **M1**: `RX_CAP = RX_MAX_LINE + RX_CHUNK`, garantido por `_Static_assert`; acima do limite, erro e fecho, sem ressincronizar (D1/D2). Provas: #6 (com ASan), #7, #21, #22, #23. Ver M1.md, P3. **Revisão do M3**: limite **64 KiB** (era 4096), acordado com o primeiro grupo; o erro passou a **`413`** (era 400); o cliente tem um modo tolerante que descarta a linha e continua (`test_framing` #78–#80).
 
 ---
 
@@ -263,7 +265,7 @@ Relevante porque os outros grupos não usam todos Linux.
 |---|---|---|
 | Fugas do cJSON | Cada `cJSON_Parse()` precisa de `cJSON_Delete()`; cada `cJSON_PrintUnformatted()` devolve memória que é preciso libertar | `Resolvido` - **M1**: uma única saída por função; mutações apanhadas pelo LeakSanitizer (M1.md, P9) |
 | Fuga de descritores | Falhar um `close(fd)` num caminho de erro esgota o limite de fds; o servidor deixa de aceitar ligações ao fim de ~1024 | `Parcial Resolvido` - rever cada `goto`/`break` |
-| Buffer na stack por thread | Com N clientes, N × buffer. Escolher tamanhos conscientemente | `Resolvido` - **M2**: ~23 KB por thread do servidor (`rxbuf` 8 KB + `chunk` 4 KB + `line` 4 KB + saídas 2,5 KB + linha codificada 4 KB + retrato 0,5 KB), dentro de uma stack de 8 MB; com o máximo de 64 clientes, ~1,5 MB. Sem `malloc` por mensagem. **M3**: a `struct msg` passou de ~1,2 KB a ~5,3 KB (buffer dos nicks do `USERS`); ~55 KB por thread no pior caso, ~3,5 MB com 64 clientes |
+| Buffer na stack por thread | Com N clientes, N × buffer. Escolher tamanhos conscientemente | `Resolvido` - **M2**: ~23 KB por thread do servidor (`rxbuf` 8 KB + `chunk` 4 KB + `line` 4 KB + saídas 2,5 KB + linha codificada 4 KB + retrato 0,5 KB), dentro de uma stack de 8 MB; com o máximo de 64 clientes, ~1,5 MB. Sem `malloc` por mensagem. **Revisão do M3** (linha de 64 KiB): `rxbuf` 68 KB + `line` 64 KB + linha codificada 64 KB + `struct msg` ~12,5 KB (várias): **~280 KB por thread** no pior caso, ~18 MB com 64 clientes — dentro dos 8 MB de cada thread. O buffer de nicks do `USERS` ficou em 8 KB (e não 64) de propósito; no cliente, os buffers de 64 KB estão em `static` |
 | Strings sem terminador | `recv()` **não** põe `\0`. Nunca passar o buffer a `printf("%s")` sem limitar o tamanho | `Resolvido` - **M1**: comprimento sempre explícito (`out_len`), linhas com `'\0'` recusadas, `%.*s` nos logs (M1.md, P6) |
 
 **Ferramenta:** `make SAN=1` (ASan + UBSan) já está no Makefile. Usar **sempre** que se testa concorrência, não só quando algo rebenta.
@@ -276,13 +278,15 @@ Relevante porque os outros grupos não usam todos Linux.
 |---|---|
 | Cada grupo resolve a semântica ambígua de forma diferente | Fechar as propostas do `PROTOCOL.md` **com os outros grupos**, por escrito. A lista completa, com prioridades e o que parte se divergirem, está em [`DECISIONS.md`](DECISIONS.md) |
 | Porta diferente por grupo | Acordar a porta por omissão (proposta: 5000) |
-| O emissor de `MSG` recebe o próprio `CHAT`? | Se um grupo decide que sim e outro que não, as mensagens aparecem duplicadas ou em falta - e parece um bug de rede. **Proposta nossa (D5): sim** - `PROTOCOL.md` v0.2, por acordar |
-| `OK` a todos os pedidos ou só a alguns? | Um cliente que espere `OK` bloqueia contra um servidor que não o envia. **Proposta nossa (D6): `OK` ao `NICK`**; o nosso cliente tem timeout de 5 s para não bloquear contra quem decidir diferente |
+| O emissor de `MSG` recebe o próprio `CHAT`? | Se um grupo decide que sim e outro que não, as mensagens aparecem duplicadas ou em falta - e parece um bug de rede. **D5: sim** — acordado com o grupo 1 |
+| `OK` a todos os pedidos ou só a alguns? | Um cliente que espere `OK` bloqueia contra um servidor que não o envia. **D13 (revisão do M3): `OK` a todo o pedido aceite**, sempre antes do `CHAT` — a leitura literal do slide 124, acordada com o grupo 1. O nosso cliente não espera pelo `OK` (só no `NICK`) e não o mostra |
 | Campos desconhecidos | A spec já diz: **ignorar**. Isto permite extensões sem partir ninguém |
 | A 1.ª linha depois do `NICK` é a resposta? | No nosso servidor **sim**, garantido (3.5). Mas o nosso cliente não o assume: espera por `OK`/`ERROR` e mostra o que vier antes, para aguentar servidores que mandem boas-vindas ou um `EVENT` primeiro |
 | Servidor cheio | **Proposta nossa (D12):** `ERROR 503 "server full"` e fecho, em vez de um fecho sem explicação |
 | Nicks com maiúsculas/acentos/espaços | **Proposta nossa (D4, D18, D20):** 1–32 bytes, sem espaços, `"`, `\` nem caracteres de controlo, UTF-8 aceite sem validar; **sem olhar a maiúsculas** (só ASCII) para a unicidade e para o destino do `PRIV` |
-| O emissor de `PRIV` recebe cópia? | **Proposta nossa (D14): sim**, como no `MSG` — sem eco local. A cópia leva `"to"` (extensão; quem não a conhece ignora-a) |
+| O emissor de `PRIV` recebe cópia? | **D14 (revisão do M3): não**, só o `OK` — acordado com o grupo 1. Com cópia, o cliente deles mostrava-a como uma mensagem *para* o emissor. O nosso cliente mostra o `/msg` localmente |
+| Limites diferentes entre grupos (linha, texto, nick em bytes ou em caracteres) | Acordar os que partem (linha 64 KiB / `413`; `text` 1–4096 com várias linhas / `400 "text too long"` — com o grupo 1) e ser **tolerante a receber** no resto: o nosso cliente aceita nicks até 128 bytes e textos de qualquer tamanho vindos de outro servidor, cortados e marcados `[...]` |
+| Mensagens de várias linhas | O texto de outra pessoa pode trazer `\033` (apagar o ecrã, mudar cores) ou `\r` (escrever por cima). **Quem mostra é que limpa**: o nosso cliente mostra-os como `?` e indenta as linhas seguintes (`test_ui` #84) |
 | `QUIT` tem `OK`? | **Proposta nossa (D17): sim**, e o servidor fecha; também antes do `NICK`. O nosso cliente aguenta um servidor que feche sem `OK` |
 | `USERS` inclui quem pede? Que ordem? | **Proposta nossa (D16):** sim, alfabética. O `interop.py` compara a lista exata no cenário 10: contra outro grupo pode falhar só pela ordem |
 | Um cenário de interop falha só porque o outro grupo manda `EVENT` a mais | O `interop.py` salta os `EVENT` quando espera outra coisa (M3) |

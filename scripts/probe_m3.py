@@ -9,14 +9,20 @@ Seccoes:
   1. nicks unicos com corrida: 8 clientes pedem o mesmo nick no mesmo instante,
      50 vezes — ganha sempre exatamente UM (os outros: 409)
   2. maiusculas (D18): "ANA" e recusado se "ana" estiver
-  3. PRIV: chega ao destino, a copia ao emissor, e a mais NINGUEM
+  3. PRIV: o emissor recebe OK, o destino o CHAT, e mais NINGUEM nada (sem
+     copia ao emissor desde a revisao do M3)
   4. PRIV para quem entra e sai sem parar: nem crash nem respostas estranhas
      (o destino pode sair entre o "existe?" e o envio — refcount do find)
   5. LIST com a lista cheia: 64 nicks de 32 bytes, ordenados, numa linha
   6. QUIT: OK, fecho, "x left" aos outros; o que vem colado DEPOIS do QUIT e
      ignorado; o nick fica livre a seguir
   7. o nosso cliente (./bin/client) de ponta a ponta: 409 -> pede outro nick,
-     /list, /msg, comando desconhecido nao vai para o chat, /quit
+     /list, /msg (com eco local), comando desconhecido nao vai para o chat,
+     os OK nao aparecem, /quit
+  8. revisao do M3: linha de 64 KiB aceite e uma maior -> 413 e fecho; text
+     de 4097 -> 400 "text too long" e a ligacao continua; mensagem de varias
+     linhas chega igual a outro cliente, e o nosso cliente mostra-a
+     indentada e sem caracteres de controlo
 
 Uso:
     python3 scripts/probe_m3.py          # porta 5310 por omissao
@@ -54,6 +60,8 @@ def recv_all(s, timeout=0.5):
                     out.append(json.loads(line))
     except socket.timeout:
         pass
+    except ConnectionResetError:
+        out.append("RESET")                   # fecho com RST (ver seccao 8)
     return out
 
 
@@ -124,13 +132,14 @@ recv_all(ana); recv_all(rui)
 # --- 3. PRIV so chega a quem deve -------------------------------------------
 print("3. PRIV")
 send(ana, {"type": "PRIV", "to": "rui", "text": "segredo"})   # rui registou "Rui"
-priv = {"type": "CHAT", "from": "ana", "to": "Rui", "text": "segredo", "private": True}
-check("o destino recebe o CHAT privado (to como foi registado)", recv_all(rui), [priv])
-check("o emissor recebe a copia (D14)", recv_all(ana), [priv])
+priv = {"type": "CHAT", "from": "ana", "text": "segredo", "private": True}
+check("o destino (\"rui\" encontra \"Rui\") recebe o CHAT privado, sem \"to\"",
+      recv_all(rui), [priv])
+check("o emissor recebe so o OK, sem copia (D13, D14)", recv_all(ana), [{"type": "OK"}])
 check("o terceiro NAO recebe nada", recv_all(zed), [])
 send(ana, {"type": "PRIV", "to": "ana", "text": "nota"})
-check("PRIV a si proprio: uma so entrega",
-      recv_all(ana), [{"type": "CHAT", "from": "ana", "to": "ana", "text": "nota", "private": True}])
+check("PRIV a si proprio: OK e o CHAT, uma vez cada",
+      recv_all(ana), [{"type": "OK"}, {"type": "CHAT", "from": "ana", "text": "nota", "private": True}])
 send(ana, {"type": "PRIV", "to": "fantasma", "text": "?"})
 check("PRIV para quem nao esta -> 404", [m.get("code") for m in recv_all(ana)], [404])
 
@@ -148,7 +157,7 @@ def pisca():
         except OSError:
             pass
 t = threading.Thread(target=pisca, daemon=True); t.start()
-estranhas = 0; copias = 0; nao_ha = 0
+estranhas = 0; aceites = 0; nao_ha = 0
 ana.settimeout(2)
 f = ana.makefile("rb")
 for i in range(1500):
@@ -158,16 +167,16 @@ for i in range(1500):
         if m.get("type") == "EVENT":
             continue
         break
-    if m.get("type") == "CHAT" and m.get("private") and m.get("text") == str(i):
-        copias += 1
+    if m.get("type") == "OK":
+        aceites += 1
     elif m.get("type") == "ERROR" and m.get("code") == 404:
         nao_ha += 1
     else:
         estranhas += 1
 parar.set(); t.join()
 time.sleep(0.4); recv_all(ana); recv_all(rui); recv_all(zed)
-check(f"1500 PRIV: so copias ({copias}) ou 404 ({nao_ha}), nada mais", estranhas, 0)
-check("e houve dos dois (a corrida aconteceu mesmo)", copias > 0 and nao_ha > 0, True)
+check(f"1500 PRIV: so OK ({aceites}) ou 404 ({nao_ha}), nada mais", estranhas, 0)
+check("e houve dos dois (a corrida aconteceu mesmo)", aceites > 0 and nao_ha > 0, True)
 check("o servidor continua vivo", srv.poll(), None)
 
 # --- 5. LIST com a lista cheia ----------------------------------------------
@@ -223,12 +232,66 @@ check("409 -> o cliente pede outro nick e entra como ana2",
 check("/list mostra quem esta", "[online: 3] ana ana2 rui" in out, True)
 check("/msg chega ao rui como privado",
       any(m.get("text") == "ola rui" and m.get("private") for m in recv_all(outro)), True)
-check("e a copia aparece ao proprio", "<ana2 -> rui> (privado) ola rui" in out, True)
+check("e o eco LOCAL aparece ao proprio", "<ana2 -> rui> (privado) ola rui" in out, True)
+check("os OK nao aparecem no ecra", "[ok]" not in out, True)
 check("/lsit e recusado localmente, nao vai para o chat",
       "comando desconhecido" in out and not any(
           m.get("text") == "/lsit" for m in recv_all(dono) if isinstance(m, dict)), True)
 check("/quit sai com 0", p.returncode, 0)
 dono.close(); outro.close()
+
+
+# --- 8. revisao do M3: limites e varias linhas ------------------------------
+print("8. limites e varias linhas")
+ana = entra("ana"); rui = entra("rui"); recv_all(ana)
+
+def manda_bruto(s, data):
+    s.sendall(data)
+
+# Uma linha de EXATAMENTE 64 KiB (com o '\n') e aceite pelo framing: como o
+# text tem mais de 4096, a resposta e o 400 "text too long" — e nao o 413.
+pre = b'{"type":"MSG","text":"'; pos = b'"}\n'
+linha = pre + b"x" * (65536 - len(pre) - len(pos)) + pos
+manda_bruto(ana, linha)
+r = recv_all(ana, 1.0)
+check("linha de 65536 bytes: chega a session (400 text too long, nao 413)",
+      [(m.get("code"), m.get("reason")) for m in r if isinstance(m, dict)],
+      [(400, "text too long")])
+send(ana, {"type": "MSG", "text": "ainda aqui"})
+check("e a ligacao continua", [m.get("type") for m in recv_all(ana)], ["OK", "CHAT"])
+recv_all(rui)
+
+# 65537 bytes: um a mais -> 413 e o servidor fecha.
+x = conn(); send(x, {"type": "NICK", "nick": "grande"}); recv_all(x)
+manda_bruto(x, pre + b"y" * (65537 - len(pre) - len(pos)) + pos)
+r = [m.get("code") if isinstance(m, dict) else m for m in recv_all(x, 1.5)]
+# O servidor fecha com bytes do cliente ainda por ler (o resto da linha), e
+# o kernel manda RST em vez de FIN — que pode engolir o proprio ERROR 413. E
+# o problema conhecido do "line too long" (M0 nota 4, M1 caso hostil B), que
+# fica para o M4. Aqui aceita-se o 413 + fecho, ou so o RST.
+check("linha de 65537 bytes: ERROR 413 e o servidor fecha (ou RST, M4)",
+      r in ([413, "CLOSED"], [413, "RESET"], ["RESET"]), True)
+if r == ["RESET"]:
+    print("        (desta vez o RST engoliu o 413 — o problema do M4)")
+x.close(); recv_all(ana); recv_all(rui)
+
+# Varias linhas, com um '\033' pelo meio: chega igual (o servidor nao mexe).
+send(ana, {"type": "MSG", "text": "l1\nl2\x1b[2J"})
+r = recv_all(rui)
+check("mensagem de varias linhas chega tal e qual a outro cliente",
+      [m.get("text") for m in r], ["l1\nl2\x1b[2J"])
+recv_all(ana)
+
+# E o nosso cliente mostra-a indentada e limpa.
+p = subprocess.Popen(["./bin/client", "127.0.0.1", PORT, "zed"], stdin=subprocess.PIPE,
+                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+time.sleep(0.5); recv_all(ana); recv_all(rui)
+send(ana, {"type": "MSG", "text": "linha 1\nlinha 2\x1b[2J"})
+time.sleep(0.4)
+out, _ = p.communicate("/quit\n", timeout=10)
+check("o nosso cliente mostra as linhas seguintes indentadas e o ESC como '?'",
+      "<ana> linha 1\n    linha 2?[2J" in out, True)
+ana.close(); rui.close(); time.sleep(0.3)
 
 # ----------------------------------------------------------------------------
 srv.terminate()

@@ -33,9 +33,13 @@ Só os tipos do M1: `NICK`, `MSG` (C→S) e `OK`, `CHAT`, `ERROR` (S→C). Os
 restantes do slide 124 entram no M3; até lá são `unknown type`.
 
 > **Desde o M3** a camada tem todos os tipos do slide 124 (`EVENT` no M2;
-> `PRIV`, `LIST`, `QUIT`, `USERS` no M3), o primeiro array (`USERS.nicks`), um
-> campo opcional `to` no `CHAT`, e nicks sem `"` nem `\` (D20). O porquê de
-> cada mudança está em [`milestones/M3.md`](milestones/M3.md).
+> `PRIV`, `LIST`, `QUIT`, `USERS` no M3), o primeiro array (`USERS.nicks`) e
+> nicks sem `"` nem `\` (D20). Na **revisão do M3** (acordo com o primeiro
+> grupo) o `text` passou a 1–4096 bytes **com várias linhas** (os caracteres de
+> controlo deixaram de ser proibidos no `text`), há a razão `"text too long"`,
+> e o que vem de um servidor é aceite de forma tolerante (texto vazio ou
+> longo, cortado; nicks até 128 bytes). Os números da §2 abaixo são os do M1.
+> O porquê de cada mudança está em [`milestones/M3.md`](milestones/M3.md).
 
 ---
 

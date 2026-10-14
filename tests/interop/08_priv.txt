@@ -1,5 +1,5 @@
-# PRIV (slide 124) -> o destino recebe CHAT com private:true; o emissor recebe
-# uma copia (D14, proposta). O "to" no CHAT e extensao nossa: nao se verifica.
+# PRIV (slide 124) -> OK ao emissor (D13) e o CHAT com private:true SO ao
+# destino: sem copia ao emissor (D14). Acordado com o primeiro grupo.
 a> {"type":"NICK","nick":"ana"}
 a< {"type":"OK"}
 b> {"type":"NICK","nick":"rui"}
@@ -7,8 +7,11 @@ b< {"type":"OK"}
 c> {"type":"NICK","nick":"zed"}
 c< {"type":"OK"}
 a> {"type":"PRIV","to":"rui","text":"so para ti"}
+a< {"type":"OK"}
 b< {"type":"CHAT","from":"ana","text":"so para ti","private":true}
-a< {"type":"CHAT","from":"ana","text":"so para ti","private":true}
-# O zed nao pode ter recebido o PRIV: a 1.a coisa que ve depois e o seu USERS.
+# Nem a ana (sem copia) nem o zed receberam o CHAT: a 1.a coisa que cada um
+# ve a seguir e o USERS que pediu.
+a> {"type":"LIST"}
+a< {"type":"USERS"}
 c> {"type":"LIST"}
 c< {"type":"USERS"}

@@ -85,7 +85,8 @@ check("rui ve o zed entrar", recv_all(b), [{"type":"EVENT","text":"zed joined"}]
 # --- 2. broadcast: todos recebem, INCLUINDO o emissor (D5) ---
 send(a, {"type":"MSG","text":"ola a todos"})
 chat = {"type":"CHAT","from":"ana","text":"ola a todos","private":False}
-check("o EMISSOR recebe o proprio CHAT (D5)", recv_all(a), [chat])
+# Desde a revisao do M3 o emissor recebe primeiro o OK (D13) e depois o CHAT.
+check("o EMISSOR recebe OK e o proprio CHAT (D13, D5)", recv_all(a), [{"type":"OK"}, chat])
 check("rui recebe o CHAT", recv_all(b), [chat])
 check("zed recebe o CHAT", recv_all(c), [chat])
 

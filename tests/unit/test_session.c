@@ -7,7 +7,9 @@
  *
  * Numeração: o 17 vem da tabela em docs/milestones/M1.md; 33-39 acrescentados
  * com a máquina de estados (M1); 48-52 com os destinos e os EVENT (M2);
- * 63-70 com os comandos do M3 (409, PRIV, LIST, QUIT).
+ * 63-70 com os comandos do M3 (409, PRIV, LIST, QUIT). Na revisão do M3
+ * (D13/D14) o MSG e o PRIV passaram a ter OK primeiro, e o PRIV deixou de ter
+ * cópia: 34, 39, 49, 64 e 66 foram revistos, e o 83 prova a ordem.
  *
  * Desde o M3 a session pergunta coisas sobre os OUTROS a um "diretório"
  * (session.h). Aqui o diretório é um array — os "outros" que estão no chat —
@@ -136,14 +138,16 @@ static void caso_33_nick_ok(void)
 /* 34. MSG em READY -> CHAT com o nick DA SESSAO. */
 static void caso_34_msg_vira_chat(void)
 {
-    CASE(34, "MSG -> CHAT com from = nick da sessao");
+    CASE(34, "MSG -> OK e depois CHAT com from = nick da sessao");
     start(&s);
     send_line("{\"type\":\"NICK\",\"nick\":\"ana\"}");
-    CHECK_STR(send_line("{\"type\":\"MSG\",\"text\":\"hello\"}"),
+    CHECK_STR(send_line("{\"type\":\"MSG\",\"text\":\"hello\"}"), OK_LINE);
+    CHECK_STR(wire_of(1),
               "{\"type\":\"CHAT\",\"from\":\"ana\",\"text\":\"hello\",\"private\":false}\n");
 
     CASE(34, "um campo \"from\" mandado pelo cliente e ignorado (nao se faz passar por outro)");
-    CHECK_STR(send_line("{\"type\":\"MSG\",\"from\":\"rui\",\"text\":\"oi\"}"),
+    send_line("{\"type\":\"MSG\",\"from\":\"rui\",\"text\":\"oi\"}");
+    CHECK_STR(wire_of(1),
               "{\"type\":\"CHAT\",\"from\":\"ana\",\"text\":\"oi\",\"private\":false}\n");
 }
 
@@ -224,9 +228,11 @@ static void caso_39_sessao_completa(void)
     CHECK_STR(send_line("{\"type\":\"MSG\",\"text\":\"cedo demais\"}"),
               "{\"type\":\"ERROR\",\"code\":401,\"reason\":\"nick required\"}\n");
     CHECK_STR(send_line("{\"type\":\"NICK\",\"nick\":\"ana\"}"), OK_LINE);
-    CHECK_STR(send_line("{\"type\":\"MSG\",\"text\":\"ola\"}"),
+    CHECK_STR(send_line("{\"type\":\"MSG\",\"text\":\"ola\"}"), OK_LINE);
+    CHECK_STR(wire_of(1),
               "{\"type\":\"CHAT\",\"from\":\"ana\",\"text\":\"ola\",\"private\":false}\n");
-    CHECK_STR(send_line("{\"type\":\"MSG\",\"text\":\"diz \\\"oi\\\"\"}"),
+    send_line("{\"type\":\"MSG\",\"text\":\"diz \\\"oi\\\"\"}");
+    CHECK_STR(wire_of(1),
               "{\"type\":\"CHAT\",\"from\":\"ana\",\"text\":\"diz \\\"oi\\\"\",\"private\":false}\n");
 }
 
@@ -260,13 +266,15 @@ static void caso_48_nick_gera_ok_e_event(void)
  *     nao deve ecoar localmente o que escreve. */
 static void caso_49_msg_vai_para_todos(void)
 {
-    CASE(49, "MSG -> 1 saida, destino ALL (D5)");
+    CASE(49, "MSG -> 2 saidas: OK so ao proprio, CHAT para ALL (D5, D13)");
     start(&s);
     send_line("{\"type\":\"NICK\",\"nick\":\"ana\"}");
     send_line("{\"type\":\"MSG\",\"text\":\"ola\"}");
-    CHECK_INT(n_outs, 1);
-    CHECK_INT(outs[0].dest, SESS_ALL);
-    CHECK_INT(outs[0].msg.type, MT_CHAT);
+    CHECK_INT(n_outs, 2);
+    CHECK_INT(outs[0].dest, SESS_SELF);
+    CHECK_INT(outs[0].msg.type, MT_OK);
+    CHECK_INT(outs[1].dest, SESS_ALL);
+    CHECK_INT(outs[1].msg.type, MT_CHAT);
 }
 
 /* 50. Os erros sao SEMPRE so para quem se enganou: um cliente com um bug nao
@@ -372,28 +380,33 @@ static void caso_63_nick_em_uso(void)
 /* 64. PRIV -> CHAT privado ao destino + copia ao emissor (D14). */
 static void caso_64_priv(void)
 {
-    const char *chat = "{\"type\":\"CHAT\",\"from\":\"ana\",\"to\":\"rui\","
+    /* Sem "to" no fio e sem copia ao emissor (revisao do M3, D14). */
+    const char *chat = "{\"type\":\"CHAT\",\"from\":\"ana\","
                        "\"text\":\"hi\",\"private\":true}\n";
 
-    CASE(64, "PRIV -> 2 saidas: TO (destino) e depois SELF (copia)");
+    CASE(64, "PRIV -> 2 saidas: OK ao emissor (SELF), CHAT so ao destino (TO)");
     start(&s);
     fake_add("rui");
     send_line(NICK_ANA);
-    CHECK_STR(send_line("{\"type\":\"PRIV\",\"to\":\"rui\",\"text\":\"hi\"}"), chat);
+    CHECK_STR(send_line("{\"type\":\"PRIV\",\"to\":\"rui\",\"text\":\"hi\"}"), OK_LINE);
     CHECK_INT(n_outs, 2);
-    CHECK_INT(outs[0].dest, SESS_TO);
-    CHECK_STR(outs[0].msg.to, "rui");
-    CHECK_INT(outs[1].dest, SESS_SELF);
+    CHECK_INT(outs[0].dest, SESS_SELF);
+    CHECK_INT(outs[1].dest, SESS_TO);
+    CHECK_STR(outs[1].msg.to, "rui");
     CHECK_STR(wire_of(1), chat);
+
+    CASE(64, "nenhuma das saidas e uma copia do CHAT para o emissor");
+    CHECK(!(outs[0].dest == SESS_SELF && outs[0].msg.type == MT_CHAT));
+    CHECK(!(outs[1].dest == SESS_SELF && outs[1].msg.type == MT_CHAT));
 
     CASE(64, "o from vem da sessao, nunca do cliente");
     send_line("{\"type\":\"PRIV\",\"to\":\"rui\",\"text\":\"hi\",\"from\":\"zed\"}");
-    CHECK_STR(outs[0].msg.from, "ana");
+    CHECK_STR(outs[1].msg.from, "ana");
 
-    CASE(64, "o to sai como foi REGISTADO: /msg RUI chega como \"to\":\"rui\" (D18)");
+    CASE(64, "o destino e o nick como foi REGISTADO: /msg RUI encontra \"rui\" (D18)");
     send_line("{\"type\":\"PRIV\",\"to\":\"RUI\",\"text\":\"hi\"}");
     CHECK_INT(n_outs, 2);
-    CHECK_STR(outs[0].msg.to, "rui");
+    CHECK_STR(outs[1].msg.to, "rui");
 }
 
 /* 65. PRIV para quem nao existe -> 404 (D15); antes do NICK -> 401. */
@@ -424,14 +437,15 @@ static void caso_65_priv_erros(void)
 /* 66. PRIV a si proprio: entregue UMA vez. */
 static void caso_66_priv_a_si_proprio(void)
 {
-    CASE(66, "PRIV para o proprio -> 1 saida, SELF");
+    CASE(66, "PRIV para o proprio -> OK e o CHAT, os dois para SELF, uma vez cada");
     start(&s);
     send_line(NICK_ANA);
-    CHECK_STR(send_line("{\"type\":\"PRIV\",\"to\":\"Ana\",\"text\":\"nota\"}"),
-              "{\"type\":\"CHAT\",\"from\":\"ana\",\"to\":\"ana\","
-              "\"text\":\"nota\",\"private\":true}\n");
-    CHECK_INT(n_outs, 1);
+    CHECK_STR(send_line("{\"type\":\"PRIV\",\"to\":\"Ana\",\"text\":\"nota\"}"), OK_LINE);
+    CHECK_INT(n_outs, 2);
     CHECK_INT(outs[0].dest, SESS_SELF);
+    CHECK_INT(outs[1].dest, SESS_SELF);
+    CHECK_STR(wire_of(1), "{\"type\":\"CHAT\",\"from\":\"ana\","
+                          "\"text\":\"nota\",\"private\":true}\n");
 }
 
 /* 67. LIST -> USERS: inclui o proprio, por ordem alfabetica (D16). */
@@ -516,6 +530,41 @@ static void caso_70_users_do_cliente(void)
               "{\"type\":\"ERROR\",\"code\":400,\"reason\":\"unexpected type\"}\n");
 }
 
+
+/* 83. Revisao do M3 (D13): o OK sai SEMPRE antes de qualquer CHAT, e so
+ *     quando o pedido foi aceite. Um pedido recusado recebe so o ERROR. */
+static void caso_83_ok_antes_do_chat(void)
+{
+    CASE(83, "MSG e PRIV aceites: a 1.a saida e o OK, para o proprio");
+    start(&s);
+    fake_add("rui");
+    send_line(NICK_ANA);
+    send_line("{\"type\":\"MSG\",\"text\":\"a\"}");
+    CHECK(n_outs == 2 && outs[0].msg.type == MT_OK && outs[1].msg.type == MT_CHAT);
+    send_line("{\"type\":\"PRIV\",\"to\":\"rui\",\"text\":\"b\"}");
+    CHECK(n_outs == 2 && outs[0].msg.type == MT_OK && outs[1].msg.type == MT_CHAT);
+
+    CASE(83, "recusados: so o ERROR, nunca OK + ERROR");
+    send_line("{\"type\":\"PRIV\",\"to\":\"ninguem\",\"text\":\"b\"}");
+    CHECK(n_outs == 1 && outs[0].msg.type == MT_ERROR);
+    send_line("{\"type\":\"MSG\",\"text\":\"\"}");
+    CHECK(n_outs == 1 && outs[0].msg.type == MT_ERROR);
+
+    CASE(83, "MSG de varias linhas e aceite e o CHAT leva o texto tal e qual");
+    send_line("{\"type\":\"MSG\",\"text\":\"l1\\nl2\"}");
+    CHECK_INT(n_outs, 2);
+    CHECK_STR(outs[1].msg.text, "l1\nl2");
+
+    CASE(83, "text grande de mais -> 400 \"text too long\" e a sessao continua");
+    static char big[PROTO_TEXT_MAX + 64];
+    int k = snprintf(big, sizeof big, "{\"type\":\"MSG\",\"text\":\"");
+    memset(big + k, 'x', PROTO_TEXT_MAX + 1);
+    strcpy(big + k + PROTO_TEXT_MAX + 1, "\"}");
+    CHECK_STR(send_line(big),
+              "{\"type\":\"ERROR\",\"code\":400,\"reason\":\"text too long\"}\n");
+    CHECK_INT(s.state, SESS_READY);
+}
+
 /* ------------------------------------------------------------------------ */
 
 int main(void)
@@ -541,5 +590,6 @@ int main(void)
     caso_68_list_cheia();
     caso_69_quit();
     caso_70_users_do_cliente();
+    caso_83_ok_antes_do_chat();
     return t_report("session");
 }

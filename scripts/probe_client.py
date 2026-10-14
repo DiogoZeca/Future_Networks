@@ -52,8 +52,18 @@ SCENARIOS = {
         "fecha a ligacao a meio de uma resposta",
         lambda i: OK if i == 0 else (b'{"type":"CHA', None)),
     "linha_gigante": (
-        "manda 5000 bytes sem '\\n'",
+        "manda 5000 bytes sem '\\n' e fecha",
         lambda i: OK if i == 0 else b"Z" * 5000),
+    # Revisao do M3: o cliente e tolerante a receber. Uma linha maior do que
+    # 64 KiB e descartada (com um aviso) e a seguinte e mostrada normalmente.
+    "linha_acima_64k": (
+        "manda 70000 bytes com '\\n' e depois um CHAT normal",
+        lambda i: OK if i == 0 else b"Z" * 70000 + b"\n" + chat(b"depois da gigante")),
+    # Como o servidor do primeiro grupo com quem falamos: OK a cada pedido
+    # aceite, antes do CHAT. Os OK nao devem aparecer no ecra.
+    "ok_a_cada_pedido": (
+        "responde OK + CHAT a cada mensagem; o CHAT tem varias linhas e um ESC",
+        lambda i: OK if i == 0 else OK + chat(b"linha 1\\nlinha 2\\u001b[31m")),
     "crlf_e_ordem": (
         "termina em \\r\\n, chaves por outra ordem, campo extra",
         lambda i: b'{"type":"OK"}\r\n' if i == 0 else

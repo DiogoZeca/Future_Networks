@@ -40,8 +40,11 @@
 
 /* ---- Capacidades -------------------------------------------------------- */
 
-/* Comprimento máximo de uma linha, INCLUINDO o '\n' (PROTOCOL.md §2). */
-#define RX_MAX_LINE 4096
+/* Comprimento máximo de uma linha, INCLUINDO o '\n' (PROTOCOL.md §2).
+ *
+ * 64 KiB desde o M3, acordado com o primeiro grupo com quem falámos (até ao
+ * M3 eram 4096). Uma linha maior -> ERROR 413 e o servidor fecha (D1, D2). */
+#define RX_MAX_LINE 65536
 
 /* Tamanho mínimo do out[] passado a rxbuf_next_line(): o conteúdo sem o '\n'
  * (<= RX_MAX_LINE - 1) mais o '\0' terminador. */
@@ -54,8 +57,10 @@
  *
  * NÃO é um número redondo escolhido por gosto — é a soma de duas quantidades:
  * depois de drenar todas as linhas completas, o resíduo é uma linha incompleta,
- * logo sem '\n', logo <= RX_MAX_LINE - 1 = 4095 bytes. O feed seguinte traz no
- * máximo RX_CHUNK = 4096. Pior caso: 4095 + 4096 = 8191 <= 8192.
+ * logo sem '\n', logo <= RX_MAX_LINE - 1 bytes. O feed seguinte traz no máximo
+ * RX_CHUNK = 4096. Pior caso: (RX_MAX_LINE - 1) + RX_CHUNK < RX_CAP.
+ * (Com os 4096 do M1/M2: 4095 + 4096 = 8191 <= 8192. Com os 64 KiB do M3:
+ * 65535 + 4096 = 69631 <= 69632.)
  *
  * O _Static_assert abaixo garante que continua a ser verdade se alguém mexer
  * num dos lados. */
@@ -72,6 +77,8 @@ struct rxbuf {
     size_t len;      /* bytes válidos em data[0..len)                        */
     size_t scanned;  /* data[0..scanned) já foi procurado e NÃO contém '\n'  */
     int    failed;   /* 1 = envenenado; só rxbuf_init() limpa                */
+    int    lenient;  /* 1 = modo tolerante (cliente, M3): ver rxbuf_init_lenient */
+    int    skipping; /* modo tolerante: a descartar o resto de uma linha longa */
     char   data[RX_CAP];
 };
 
@@ -96,7 +103,9 @@ enum {
     RX_LINE    =  1,  /* linha extraída; out[] NUL-terminado; *out_len >= 1   */
     RX_NEED    =  0,  /* faltam bytes: chamar recv() outra vez                */
     RX_TOOLONG = -1,  /* culpa DELES: linha > RX_MAX_LINE. Buffer envenenado  */
-    RX_FAULT   = -2   /* culpa NOSSA: out == NULL, ou cap < RX_LINE_BUF       */
+    RX_FAULT   = -2,  /* culpa NOSSA: out == NULL, ou cap < RX_LINE_BUF       */
+    RX_SKIPPED =  2   /* só no modo tolerante: uma linha longa foi DESCARTADA;
+                         o buffer continua bom e a próxima chamada segue      */
 };
 
 /* A separação RX_TOOLONG / RX_FAULT é "culpa deles" vs "culpa nossa". Ambos
@@ -110,6 +119,21 @@ enum {
  * erro — não existe rxbuf_reset() de propósito: ter duas formas de limpar é um
  * convite a usar a errada a seguir a um erro. */
 void rxbuf_init(struct rxbuf *rx);
+
+/* Como rxbuf_init(), mas em modo TOLERANTE (M3, para o cliente).
+ *
+ * No servidor, uma linha demasiado longa envenena o buffer e fecha a ligação
+ * (D2): é um cliente a violar o protocolo, e não vale a pena adivinhar onde
+ * começa a mensagem seguinte. No CLIENTE o raciocínio é outro: quem manda é
+ * um servidor (talvez de outro grupo) que escreve linhas completas, por isso a
+ * mensagem seguinte começa garantidamente a seguir ao próximo '\n'. Fechar o
+ * cliente por causa de UMA mensagem grande de mais seria ser intolerante a
+ * receber.
+ *
+ * Neste modo, uma linha longa é descartada até ao '\n' que a termina (mesmo
+ * que chegue em vários feeds) e rxbuf_next_line() devolve RX_SKIPPED uma vez;
+ * as linhas seguintes são entregues normalmente. Nunca devolve RX_TOOLONG. */
+void rxbuf_init_lenient(struct rxbuf *rx);
 
 /* Acrescenta n bytes ao buffer.
  *
@@ -133,7 +157,8 @@ int rxbuf_feed(struct rxbuf *rx, const char *b, size_t n);
  *   out_len  comprimento do conteúdo, SEM o '\n' (e sem o '\r' de um "\r\n").
  *            Pode ser NULL se não interessar.
  *
- * Devolve RX_LINE, RX_NEED, RX_TOOLONG ou RX_FAULT (ver acima).
+ * Devolve RX_LINE, RX_NEED, RX_TOOLONG ou RX_FAULT (ver acima); no modo
+ * tolerante, RX_SKIPPED em vez de RX_TOOLONG.
  *
  * Com RX_LINE, out[] fica NUL-terminado e *out_len >= 1 — linhas vazias são
  * saltadas aqui dentro, nunca devolvidas ao chamador. Se fossem devolvidas,

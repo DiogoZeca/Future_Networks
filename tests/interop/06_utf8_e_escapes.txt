@@ -3,4 +3,5 @@
 > {"type":"NICK","nick":"zé"}
 < {"type":"OK"}
 > {"type":"MSG","text":"diz \"olá\" \\ adeus"}
+< {"type":"OK"}
 < {"type":"CHAT","from":"zé","text":"diz \"olá\" \\ adeus"}

@@ -38,10 +38,26 @@ static void poison(struct rxbuf *rx)
 
 void rxbuf_init(struct rxbuf *rx)
 {
-    rx->len     = 0;
-    rx->scanned = 0;
-    rx->failed  = 0;
+    rx->len      = 0;
+    rx->scanned  = 0;
+    rx->failed   = 0;
+    rx->lenient  = 0;
+    rx->skipping = 0;
     /* data[] não precisa de ser limpo: só data[0..len) é alguma vez lido. */
+}
+
+void rxbuf_init_lenient(struct rxbuf *rx)
+{
+    rxbuf_init(rx);
+    rx->lenient = 1;
+}
+
+/* Modo tolerante: deita fora data[0..n) e recomeça a procura. */
+static void drop_front(struct rxbuf *rx, size_t n)
+{
+    rx->len -= n;
+    memmove(rx->data, rx->data + n, rx->len);
+    rx->scanned = 0;
 }
 
 int rxbuf_feed(struct rxbuf *rx, const char *b, size_t n)
@@ -83,10 +99,23 @@ int rxbuf_next_line(struct rxbuf *rx, char *out, size_t cap, size_t *out_len)
     if (out == NULL || cap < RX_LINE_BUF)
         return RX_FAULT;
 
-    /* O ciclo só existe para saltar linhas vazias (passo 9). */
+    /* O ciclo só existe para saltar linhas vazias (passo 9) e, no modo
+     * tolerante, o fim de uma linha longa que se está a descartar. */
     for (;;) {
         /* 3. Procurar '\n' só nos bytes AINDA NÃO examinados. */
         char *nl = memchr(rx->data + rx->scanned, '\n', rx->len - rx->scanned);
+
+        /* 3b. Modo tolerante, a meio de uma linha longa: tudo até ao '\n' (e
+         *     ele próprio) é dessa linha e vai fora. Sem '\n', vai tudo fora. */
+        if (rx->skipping) {
+            if (nl == NULL) {
+                rx->len = rx->scanned = 0;
+                return RX_NEED;
+            }
+            drop_front(rx, (size_t)(nl - rx->data) + 1);
+            rx->skipping = 0;
+            continue;
+        }
 
         /* 4. Não há linha completa. */
         if (nl == NULL) {
@@ -95,6 +124,11 @@ int rxbuf_next_line(struct rxbuf *rx, char *out, size_t cap, size_t *out_len)
              * que acabe aqui terá pelo menos RX_MAX_LINE + 1 bytes. Detetar já
              * é o que mantém o resíduo <= RX_MAX_LINE - 1 (framing.md §3.1). */
             if (rx->len >= RX_MAX_LINE) {
+                if (rx->lenient) {              /* descartar até ao '\n' */
+                    rx->len = rx->scanned = 0;
+                    rx->skipping = 1;
+                    return RX_SKIPPED;
+                }
                 poison(rx);
                 return RX_TOOLONG;
             }
@@ -103,7 +137,11 @@ int rxbuf_next_line(struct rxbuf *rx, char *out, size_t cap, size_t *out_len)
 
         /* 5. Bytes a consumir do buffer, INCLUINDO o '\n'. */
         size_t consume = (size_t)(nl - rx->data) + 1;
-        if (consume > RX_MAX_LINE) {            /* 4096 cabe, 4097 não (#21) */
+        if (consume > RX_MAX_LINE) {            /* RX_MAX_LINE cabe, +1 não (#21) */
+            if (rx->lenient) {                  /* a linha acaba aqui: tirá-la */
+                drop_front(rx, consume);        /* e guardar o que vem a seguir */
+                return RX_SKIPPED;
+            }
             poison(rx);
             return RX_TOOLONG;
         }
@@ -114,7 +152,7 @@ int rxbuf_next_line(struct rxbuf *rx, char *out, size_t cap, size_t *out_len)
             content--;
 
         /* 7. Copiar para fora PRIMEIRO... */
-        memcpy(out, rx->data, content);         /* content <= 4095 < cap */
+        memcpy(out, rx->data, content);         /* content <= RX_MAX_LINE-1 < cap */
         out[content] = '\0';
 
         /* 8. ...e só DEPOIS compactar. Ao contrário, out receberia os bytes da

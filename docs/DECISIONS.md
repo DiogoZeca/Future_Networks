@@ -1,24 +1,25 @@
 # Decisions to agree with the other groups
 
-What still **has to be agreed** with the other groups so that our client works
-with their servers and our server works with their clients — and, just as
-important, what does **not** need agreeing because the slides already decide
-it.
+What **has to be agreed** with the other groups so that our client works with
+their servers and our server works with their clients — what is already
+agreed, and what does **not** need agreeing because the slides decide it.
 
-- The specification is in [`PROTOCOL.md`](PROTOCOL.md) (v0.5). This file says
-  **what to ask**, and what happens if two groups decide differently.
-- Every row has **our proposal**, already implemented and tested. A proposal is
-  not an imposition: if most groups decide otherwise, we change. Each decision
-  lives in a single place in our code (see the "In our code" column), so
-  changing it is cheap.
-- When a point is agreed, mark it **AGREED** here and in `PROTOCOL.md`. Once
-  all **A** points are agreed, `PROTOCOL.md` becomes v1.0.
+- The specification is in [`PROTOCOL.md`](PROTOCOL.md) (v0.6). This file says
+  **what to ask**, what was agreed with whom, and what happens if two groups
+  decide differently.
+- Every row has **our position**, implemented and tested. Each decision lives
+  in a single place in our code (see the "In our code" column), so changing
+  it is cheap — the first agreement (group 1, below) changed four of them in
+  one afternoon.
+- Status of each point: **AGREED (g1)** = agreed with group 1; **OPEN** =
+  still to ask. Once every **A** point is agreed with the groups we test with,
+  `PROTOCOL.md` becomes v1.0.
 
 | Section | What it is | Needs agreement? |
 |---|---|---|
 | **S** | Fixed by the slides | **No** — only confirm everyone reads the slide the same way |
-| **A** | Open, and breaks interoperability if groups differ | **Yes** — the only real negotiation |
-| **B** | Open, but only changes what the user sees (or what our tests compare) | Nice to have |
+| **A** | Breaks interoperability if groups differ | **Yes** — the real negotiation |
+| **B** | Only changes what the user sees (or what our tests compare) | Nice to have |
 | **C** | Internal to our implementation | No (worth mentioning) |
 | **D** | Later milestones (M4–M6): what the slides fix and what is still open | Agree early |
 
@@ -29,17 +30,32 @@ we never send, and that we accept gracefully when someone else sends it, needs
 no agreement: whatever the other group decides, nothing breaks. For example,
 our client never sends an empty line or two objects on one line, and our
 server copes when someone else does — so how each server reacts to them is
-its own business (section C), not something to negotiate.
+its own business (section C).
+
+The first conversation (group 1) showed it again: their nicks are counted in
+**characters**, ours in **bytes**. Instead of negotiating, our client now
+accepts nicks of up to 128 bytes from other servers (32 UTF-8 characters),
+while our server keeps its 32-byte limit. Nothing to agree.
 
 ---
 
 ## Contact log
 
-| Group | Language | Who | Date | S confirmed | A points agreed | `interop.py` against their server | Their client against our server |
+| Group | Language | Who | Date | S confirmed | A agreed | `interop.py` against their server | Their client against our server |
 |---|---|---|---|---|---|---|---|
+| **g1** — *(group name)* | Python (?) | *(friend's name)* | 2026-10-14 | yes | A1–A6 (A7: ask) | to do | to do |
 | | | | | | | | |
 | | | | | | | | |
-| | | | | | | | |
+
+### What we changed after talking to group 1
+
+| Before (v0.5) | After (v0.6) | Why |
+|---|---|---|
+| `MSG` and `PRIV` were confirmed by the `CHAT`, no `OK` | `OK` to every accepted request, **before** the `CHAT` | the literal reading of slide 124 (*"Last request accepted"*); their server already did it, and neither client waits for `OK`, so it costs nothing |
+| the sender of a `PRIV` received a copy (with a `"to"` field) | **no copy, no `"to"`**; our client echoes `/msg` locally | their client would have shown our copy as a message *to* the sender; a `CHAT` means "a message that reached you" |
+| line ≤ 4096 bytes, above it `400` and close | line ≤ **64 KiB**, above it **`413`** and close | their limit; 413 = "connection unusable, closed", 400 = "refused, carry on" |
+| text 1–1024 bytes, no control characters | text 1–**4096** bytes, **multi-line allowed**; above it `400 "text too long"`, connection stays open | their proposal; we kept "no empty text" |
+| our client rejected a `CHAT` it could not fit, and closed on an over-long line | our client accepts and cuts (`[...]`), and discards an over-long line | tolerant receiving: their server has no text limit of its own |
 
 ---
 
@@ -47,65 +63,61 @@ its own business (section C), not something to negotiate.
 
 | # | What is fixed | Slide | What we do |
 |---|---|---|---|
-| S1 | The 10 message types, their fields and directions: `NICK`, `MSG`, `PRIV`, `LIST`, `QUIT` (C→S); `OK`, `CHAT`, `USERS`, `EVENT`, `ERROR` (S→C) | 124 | exactly the slide's bytes (`test_protocol` #31, #58, #59) |
-| S2 | **Newline-delimited JSON**: one JSON object per line, ending in `\n` | 123 (M1) | we send `\n`; we also accept `\r\n` and ignore empty lines (tolerant receiving — no agreement needed) |
+| S1 | The 10 message types, their fields and directions: `NICK`, `MSG`, `PRIV`, `LIST`, `QUIT` (C→S); `OK`, `CHAT`, `USERS`, `EVENT`, `ERROR` (S→C) | 124 | exactly the slide's fields, no extensions (`test_protocol` #31, #58, #59, #60) |
+| S2 | **Newline-delimited JSON**: one JSON object per line, ending in `\n` | 123 (M1) | we send `\n`; we also accept `\r\n` and ignore empty lines (tolerant receiving) |
 | S3 | Keys and `type` values are exactly as written (`"type"`, `"NICK"`) — JSON compares names exactly, so they are case-sensitive | 124 + JSON | `"Type"` or `"nick"` as a type → `ERROR 400` |
 | S4 | `code` in `ERROR` is a JSON number (`"code":409`) | 124 | integer 100–999 |
-| S5 | `NICK` **must be the first message** | 124 | our client always sends `NICK` first; our server answers anything else before it with an `ERROR` (code: B5) |
+| S5 | `NICK` **must be the first message** | 124 | our client always sends `NICK` first; our server answers anything else before it with `ERROR 401` |
 | S6 | Nicknames are **unique** | 123 (M3) | `ERROR 409` |
 | S7 | Nick in use → **`ERROR 409 "nick taken"`** | 124 | exactly that code and reason |
-| S8 | `OK` means **"last request accepted"**, so an accepted `NICK` gets `OK` | 124 | `NICK` → `OK` (which *other* requests get `OK` is open: A1) |
+| S8 | `OK` means **"last request accepted"** | 124 | read literally (AGREED g1): every accepted request gets `OK` — see A1 |
 | S9 | `USERS` is **the reply to `LIST`** | 124 | `LIST` → `USERS` (no `OK`) |
-| S10 | `ERROR` means **"request refused"** | 124 | every refused request gets exactly one `ERROR` |
-| S11 | A private message arrives as a **`CHAT` with `"private":true`**; `PRIV` is what `/msg` sends | 123, 124 | `/msg rui hi` → `PRIV` → `CHAT … "private":true` to rui |
+| S10 | `ERROR` means **"request refused"** | 124 | a refused request gets exactly one `ERROR`, and no `OK` |
+| S11 | A private message arrives as a **`CHAT` with `"private":true`**; `PRIV` is what `/msg` sends | 123, 124 | `/msg rui hi` → `PRIV` → `CHAT … "private":true` to rui only |
 | S12 | `EVENT` = **join and leave notices**; example text `"rui joined"` | 123 (M2), 124 | `"<nick> joined"` / `"<nick> left"` |
-| S13 | `QUIT` = **"leave cleanly"** | 124 | the client sends `QUIT` on `/quit` and on Ctrl+D (what the server answers: B2) |
-| S14 | **IPv4 and IPv6**: *"Use getaddrinfo() and sockaddr_storage for IPv4 / IPv6 portability"*; the client tries every candidate address (*"Retry another candidate"*) | 85 (sockets) | the server listens on both in a single dual-stack socket; the client tries each address `getaddrinfo()` returns |
-| S15 | A slow or stuck client must not block everyone: *"Use timeouts, or a send queue per client"* | 125 | 5 s send deadline (the value is each group's choice: C3) |
+| S13 | `QUIT` = **"leave cleanly"** | 124 | the client sends `QUIT` on `/quit` and on Ctrl+D |
+| S14 | **IPv4 and IPv6**: *"Use getaddrinfo() and sockaddr_storage for IPv4 / IPv6 portability"*; the client tries every candidate address (*"Retry another candidate"*) | 85 (sockets) | the server listens on both in one dual-stack socket; the client tries each address |
+| S15 | A slow or stuck client must not block everyone: *"Use timeouts, or a send queue per client"* | 125 | 5 s send deadline (group 1 uses a send queue; both are fine — C3) |
 
 **How to use this table with another group:** "We read slides 123–125 like
 this — do you too?" If someone reads one differently, it moves to section A.
-The most likely to be read differently is **S8**: *"Last request accepted"*,
-taken literally, could mean an `OK` after **every** accepted request,
-including each `MSG`. That is question A1.
 
 ---
 
-## A — Open, and breaks interoperability if groups differ
+## A — Breaks interoperability if groups differ
 
-These are the only points that really need negotiating.
-
-| # | Question | Our proposal | If groups differ | In our code | Test |
-|---|---|---|---|---|---|
-| A1 | **Which requests get an `OK`?** (the slide only says `OK` = "last request accepted") | **every request gets ONE direct answer**: `NICK` → `OK`; `MSG` → its own `CHAT`; `PRIV` → the copy of the `CHAT`; `LIST` → `USERS`; `QUIT` → `OK`. Or an `ERROR` | a client that waits for an `OK` after each `MSG` **hangs** on a server that does not send it. (Against a server that does send it, our client just prints `[ok]`.) | `session.c` (D6, D13) | `interop` 01, 03 |
-| A2 | Does the sender of `MSG` receive its **own** `CHAT`? | **yes** — it confirms the message arrived; so clients do **not** echo locally | **duplicated** messages (local echo + server copy) or **missing** ones (no echo at all) | `SESS_ALL` (D5) | `interop` 03 |
-| A3 | Does the sender of `PRIV` receive a **copy**? | **yes**, same rule as A2 | same as A2, for private messages | `handle_priv()` (D14) | `interop` 08 |
-| A4 | OK to add a `"to"` field to private `CHAT`s (our extension)? `{"type":"CHAT","from":"ana","to":"rui","text":"hi","private":true}` | **yes**, and in general: **receivers ignore unknown fields**. Without `"to"` the sender's copy cannot say who it was for. A public `CHAT` never has it (exactly the slide's bytes) | a client that **rejects** unknown fields rejects our private messages. If a group cannot accept it, we drop `"to"` (one line in `handle_priv()`) | `protocol.c`, `ui.c` | `test_protocol` #60; `interop` 05 |
-| A5 | **Maximum line length** | **4096 bytes, including the `\n`** | a 3000-byte line is accepted by one side and refused by the other | `RX_MAX_LINE` (`framing.h`) | `test_framing` #7, #21 |
-| A6 | **Field limits**, counted in **bytes** (not characters; UTF-8 is not validated) | `nick` 1–32, `text` 1–1024 (no control characters, so no multi-line messages), `reason` 0–128 | a 40-byte nick or a 2000-byte message is accepted by one server and rejected by another group's client; a group counting characters accepts 32 accented letters (64 bytes) that we reject | `protocol.h` (D3, D4) | `test_protocol` #26 |
-| A7 | **Characters forbidden in a nick** | **space, `"`, `\` and control characters** | spaces break `/msg nick text`; with `"`/`\` the worst `USERS` (64 × 32 bytes) is 4315 bytes and does not fit in a line (A5) — calculation in `PROTOCOL.md` §3.1 | `proto_valid_nick()` (D20) | `test_protocol` #61, #59 |
+| # | Question | Our position | Status | If groups differ | In our code | Test |
+|---|---|---|---|---|---|---|
+| A1 | **Which requests get an `OK`?** | every **accepted** request: `NICK`, `MSG`, `PRIV`, `QUIT` → `OK`, always **before** any `CHAT`; `LIST` → `USERS`; refused → only the `ERROR` | **AGREED (g1)** | a client that waits for `OK` after each `MSG` hangs on a server that does not send it; a server that sends it makes a naive client print `[ok]` everywhere (ours hides `OK`s) | `session.c` (D13) | `test_session` #83; `interop` 03, 08 |
+| A2 | Does the sender of `MSG` receive its **own** `CHAT`? | **yes** — so clients do **not** echo `MSG` locally | **AGREED (g1)** | duplicated or missing messages | `SESS_ALL` (D5) | `interop` 03 |
+| A3 | Does the sender of `PRIV` receive a **copy**? | **no** — only the `OK`; a client that wants to show what it sent does it **locally** | **AGREED (g1)** | with a copy, a client that echoes locally shows it twice, and one that does not shows it as a message *to* the sender | `handle_priv()` (D14) | `interop` 08 |
+| A4 | Do receivers **ignore unknown fields**? | **yes** (and our server sends no extra fields: the `"to"` of v0.5 was dropped) | **AGREED (g1)** | a receiver that rejects unknown fields breaks with any extension | `protocol.c` | `interop` 05 |
+| A5 | **Maximum line length** | **64 KiB including the `\n`**; above it `ERROR 413 "line too long"` and close | **AGREED (g1)** | a long line is accepted by one side and refused by the other | `RX_MAX_LINE` (`framing.h`) | `test_framing` #7, #21; `probe_m3.py` §8 |
+| A6 | **`text` limit** | **1–4096 bytes** (after UTF-8 encoding), **multi-line allowed** (`\n` escaped by JSON); above it `ERROR 400 "text too long"`, connection stays open | **AGREED (g1)** (they accept empty text, we do not: B12) | a long message is accepted by one server and refused by another | `PROTO_TEXT_MAX` (`protocol.h`) | `test_protocol` #26, #81; `interop` 13, 14 |
+| A7 | **Characters forbidden in a nick** | **space, `"`, `\` and control characters**; 1–32 **bytes** | **OPEN** (group 1 counts characters — harmless for us, see the note above; ask about `"` and `\`) | spaces break `/msg nick text`; a nick with `"`/`\` is legal on one server and refused on another | `proto_valid_nick()` (D20) | `test_protocol` #61 |
 
 ---
 
-## B — Open, but only changes what the user sees
+## B — Only changes what the user sees
 
 None of these break anything; agreeing them makes the chat look the same
-everywhere, and makes our conformance scenarios pass against other servers
-(they compare codes, the `USERS` order, etc.).
+everywhere, and makes our conformance scenarios pass against other servers.
 
-| # | Question | Our proposal | If groups differ | In our code |
-|---|---|---|---|---|
-| B1 | Default port | `5000` | everyone types the port by hand | `DEFAULT_PORT` |
-| B2 | `QUIT`: does the server answer before closing? | **`OK`, then close**; also before `NICK` | a client expecting `OK` shows nothing or `[ok]`; ours works either way (it sends `QUIT`, then FIN, and waits for the close) | `case MT_QUIT` (D17) |
-| B3 | Are nicks case-sensitive for uniqueness (and for finding the recipient of a `PRIV`)? | **no**: `Ana`, `ana` and `ANA` are the same nick (ASCII letters only; `Zé` ≠ `ZÉ`); shown as typed | one server allows `Ana` and `ana` together (easy impersonation); `/msg Rui` gives 404 on one server and works on another | `proto_nick_eq()` (D18) |
-| B4 | After a `409`, does the connection stay open? | **yes**, the client can try another nick | our client asks for another nick and retries; against a server that closes, it reports the close and exits | `session.c` (D19) |
-| B5 | Error codes besides 409 | **400** malformed message, **401** request before `NICK`, **404** `PRIV` to someone not in the chat, **503** server full; no other codes. Clients decide on the code, the `reason` is free text | users see different codes for the same problem; our scenarios compare codes, so they fail against other servers | `session.c`, `protocol.h` |
-| B6 | `PRIV` to a nick that is not in the chat | `ERROR 404 "no such nick"` | see B5 | `handle_priv()` (D15) |
-| B7 | `PRIV` to oneself | delivered **once** | may appear twice | `handle_priv()` |
-| B8 | Who receives an `EVENT` | everyone **except** the client it is about | the joiner sees a notice about themselves | `SESS_OTHERS` (D10) |
-| B9 | `EVENT` text on leaving | `QUIT` and a dropped connection both give `"<nick> left"` | different text; a client that **parses** `EVENT` texts to keep a user list breaks — the list must come from `LIST` | `fill_event()` (D10) |
-| B10 | Does `USERS` include the requester? In which order? | **yes**, **alphabetical ignoring case**; clients without a nick are not listed | a "N people online" counter shows N±1; our `10_list` scenario compares the exact list | `handle_list()` (D16) |
-| B11 | Server full | `ERROR 503 "server full"`, then close; the limit is each group's choice (ours: 64) | a close with no explanation | `server/main.c` (D12) |
+| # | Question | Our position | Status | If groups differ | In our code |
+|---|---|---|---|---|---|
+| B1 | Default port | `5000` | **AGREED (g1)** | everyone types the port by hand | `DEFAULT_PORT` |
+| B2 | `QUIT`: does the server answer before closing? | **`OK`, then close**; also before `NICK` | **AGREED (g1)** (before `NICK`: ask) | a client expecting `OK` shows nothing; ours works either way | `case MT_QUIT` (D17) |
+| B3 | Are nicks case-sensitive for uniqueness (and for finding the recipient of a `PRIV`)? | **no**: `Ana` = `ana` (ASCII letters only); shown as typed | **differs from g1** (case-sensitive) — kept: only changes which nicks each server allows | one server allows `Ana` and `ana` together; `/msg Rui` works on one server and gives 404 on another | `proto_nick_eq()` (D18) |
+| B4 | After a `409`, does the connection stay open? | **yes**, the client can try another nick | OPEN | our client asks for another nick and retries; against a server that closes, it reports the close | `session.c` (D19) |
+| B5 | Error codes | **400** malformed, **401** before `NICK`, **404** `PRIV` to someone not in the chat, **409** nick taken, **413** line too long, **503** server full | **AGREED (g1)** except 503 (ask); g1 also has **408** for idle (M4, D1) | users see different codes; our scenarios compare codes | `session.c`, `protocol.h` |
+| B6 | `PRIV` to a nick that is not in the chat | `ERROR 404 "no such nick"` | **AGREED (g1)** | see B5 | `handle_priv()` (D15) |
+| B7 | `PRIV` to oneself | `OK` + the `CHAT`, once | OPEN | may appear twice | `handle_priv()` |
+| B8 | Who receives an `EVENT` | everyone **except** the client it is about | **AGREED (g1)** | the joiner sees a notice about themselves | `SESS_OTHERS` (D10) |
+| B9 | `EVENT` text on leaving | `QUIT` and a dropped connection both give `"<nick> left"` | **AGREED (g1)** | a client that **parses** `EVENT` texts to keep a user list breaks — the list must come from `LIST` | `fill_event()` (D10) |
+| B10 | Does `USERS` include the requester? In which order? | **yes**, **alphabetical ignoring case** | **AGREED (g1)** (they also list users of linked servers) | a counter shows N±1; our `10_list` scenario compares the exact list | `handle_list()` (D16) |
+| B11 | Server full | `ERROR 503 "server full"`, then close; the limit is each group's choice (ours: 64) | OPEN | a close with no explanation | `server/main.c` (D12) |
+| B12 | Empty `text` in `MSG`/`PRIV` | **refused** (`400 "invalid field"`) | **differs from g1** (they accept it) — kept | an empty message from their client gets a 400 from our server; an empty `CHAT` from their server is shown by our client | `get_request_text()` |
+| B13 | Second `NICK` | `ERROR 400` (`"nick already set"`; g1 says `"already registered"`) | **AGREED (g1)** (code) | only the reason text differs | `session.c` |
 
 ---
 
@@ -118,21 +130,19 @@ that **our** programs never send (strict when sending, tolerant when receiving).
 |---|---|---|
 | C1 | Server concurrency | one thread per client (not `select`/`poll`) |
 | C2 | Maximum clients | 64 (`ROSTER_MAX`) |
-| C3 | Send deadline (S15) | 5 s per message, total deadline (not `SO_SNDTIMEO`) |
-| C4 | Line too long | `ERROR 400 "line too long"`, then close (no resynchronisation) |
-| C5 | Invalid line (not JSON, missing/wrong field, two objects on a line) | `ERROR 400`; the connection **stays open** |
-| C6 | Request before `NICK` (breaks S5) | `ERROR 401 "nick required"`; the connection stays open |
-| C7 | Second `NICK` on the same connection | `ERROR 400 "nick already set"` (no nick change) |
-| C8 | A client sends a S→C type (`OK`, `CHAT`, `USERS`, …) | `ERROR 400 "unexpected type"` |
-| C9 | `"from"` sent by a client | ignored: `from` is always the session's nick (no impersonation) |
-| C10 | Traffic before `NICK` is accepted | none: the first line a client receives is always the answer to its `NICK`. Our client does not rely on this with other servers |
-| C11 | Optional fields we receive | `private` absent = `false`; `reason` absent = `""`; `to` absent = `""` |
-| C12 | Nicks we **receive** from servers with looser rules | accepted with `"` and `\` (only spaces and control characters are refused) |
-| C13 | When a nick is freed | as soon as its connection leaves the list (`QUIT` or drop) |
-| C14 | Client commands | `/list`, `/msg <nick> <text>`, `/quit`, `/help`, `//text` for a line starting with `/`; unknown commands are refused locally (never sent to the chat) |
-| C15 | Client-side validation | same rules as the server, before sending |
-| C16 | Client waiting for the answer to `NICK` | 5 s; shows anything that arrives before the `OK` instead of taking it as the answer |
-| C17 | Language and libraries | C11 + POSIX + cJSON |
+| C3 | Slow client (S15) | 5 s send deadline per message, total deadline (not `SO_SNDTIMEO`) |
+| C4 | Invalid line (not JSON, missing/wrong field, two objects on a line) | `ERROR 400`; the connection **stays open** |
+| C5 | A client sends a S→C type (`OK`, `CHAT`, `USERS`, …) | `ERROR 400 "unexpected type"` |
+| C6 | `"from"` sent by a client | ignored: `from` is always the session's nick (no impersonation) |
+| C7 | Traffic before `NICK` is accepted | none: the first line a client receives is always the answer to its `NICK`. Our client does not rely on this with other servers |
+| C8 | Optional fields we receive | `private` absent = `false`; `reason` absent = `""` |
+| C9 | What we accept from **other servers** | nicks up to 128 bytes (32 UTF-8 characters) and with `"`/`\`; `text`/`reason` of any length, empty included (cut to fit, shown with `[...]`); over-long lines are discarded, not fatal |
+| C10 | Displaying text | control characters are shown as `?` (a `\033` could clear the screen); `\n` indents the following lines; `\t` stays |
+| C11 | When a nick is freed | as soon as its connection leaves the list (`QUIT` or drop) |
+| C12 | Client commands | `/list`, `/msg <nick> <text>`, `/quit`, `/help`, `//text` for a line starting with `/`; unknown commands are refused locally (never sent to the chat) |
+| C13 | Client and `OK` | sends and keeps reading; `OK`s are not shown; only the answer to `NICK` is waited for (5 s) |
+| C14 | `/msg` echo | local: `<ana -> rui> (privado) …`, since the server sends no copy (A3) |
+| C15 | Language and libraries | C11 + POSIX + cJSON |
 
 ---
 
@@ -140,29 +150,36 @@ that **our** programs never send (strict when sending, tolerant when receiving).
 
 The slides already fix part of each milestone (slide 123). The rest is the
 same kind of problem as above: if each group decides alone, it is only
-discovered on interop day.
+discovered on interop day. Group 1 is ahead here: their choices are the
+natural starting point.
 
 | # | Milestone | Fixed by the slides | Still open | Initial idea (not implemented yet) |
 |---|---|---|---|---|
-| D1 | M4 | an **idle timeout** must exist | how long; is the client told before? | ≥ 5 min; `ERROR 408 "idle timeout"` then close (408 = HTTP *Request Timeout*) |
+| D1 | M4 | an **idle timeout** must exist | how long; is the client told before? | **as group 1:** 300 s, then `ERROR 408` and close |
 | D2 | M4 | — | keepalive? (slide 124 has no `PING`; a new type would be `unknown type` elsewhere) | **no** new type: a client that wants to stay connected sends a `LIST` |
 | D3 | M4 | **Ctrl+C shutdown that closes sockets** | are clients told? | `EVENT "server shutting down"` to everyone, then close |
 | D4 | M4 | **automated tests with pytest** | — (internal) | our network tests are already Python scripts; turn them into pytest |
-| D5 | M5 | the server answers a **UDP broadcast** called **`DISCOVER`** with **its TCP port** | exact JSON of the request and the reply; UDP port; client wait time | request `{"type":"DISCOVER"}`; reply `{"type":"SERVER","port":5000}` (+ optional `"name"`); the IP is the packet's **source**, never a field (`typical-problems.md` §4.4); UDP port `5001`; wait 1 s and list every reply |
+| D5 | M5 | the server answers a **UDP broadcast** called **`DISCOVER`** with **its TCP port** | exact JSON of the request and the reply; UDP port; client wait time | **as group 1:** request `{"type":"DISCOVER"}` (also accept the plain text `DISCOVER`); reply `{"type":"SERVER","tcp_port":5000,…}`; UDP port **5001**; the IP is the packet's **source**, never trusted from a field; accept `{"port":N}` from other groups |
 | D6 | M6-A | file transfer with **length-prefixed binary frames** | the header and how it coexists with the JSON lines | to agree between the groups that pick it |
-| D7 | M6-B | **TLS** with `ssl` and a **self-signed certificate** | same port or another? | another port (e.g. `5443`), so clients without TLS do not break |
+| D7 | M6-B | **TLS** with `ssl` and a **self-signed certificate** | same port or another? | another port (e.g. `5443`), so clients without TLS do not break; group 1 answers TLS bytes on the normal port with `ERROR 400` and closes |
 | D8 | M6-C | chat rooms with **`/join` and `/leave`** | the message types (not in slide 124) | to agree between the groups that pick it |
-| D9 | M6 | one extension per group | which one each group picks | tell each other early |
+| D9 | M6-D | supervisory node | server-to-server messages | group 1 already links servers (`PEER`, message ids, origin); worth reading before choosing |
 
 ---
 
 ## The questions to ask (in order)
 
+For a new group:
+
 1. **A1** — Which requests get an `OK`? (and do you read *"Last request accepted"* the same way? — S8)
-2. **A2/A3** — Does the sender receive its own `CHAT`, and a copy of its `PRIV`?
-3. **A5/A6/A7** — Lines up to 4096 bytes; nick 1–32 bytes without spaces, `"` or `\`; text 1–1024 bytes; all in bytes?
-4. **A4** — Do your receivers ignore unknown fields (our `"to"`)?
-5. Section **S** — do you read the slides the same way?
+2. **A2/A3** — Does the sender receive its own `CHAT`? And a copy of its `PRIV`?
+3. **A5/A6** — Lines up to 64 KiB (413 above); text 1–4096 bytes, multi-line allowed (400 "text too long" above)?
+4. **A7** — Nick rules: 1–32 bytes, no spaces, `"` or `\`?
+5. **A4** — Do your receivers ignore unknown fields?
+6. Section **S** — do you read the slides the same way?
+
+Still to ask group 1: **A7** (`"`/`\` in nicks), **B2** (`QUIT` before `NICK`),
+**B4** (does the connection stay open after a 409?), **B7**, **B11** (503).
 
 ---
 
@@ -170,13 +187,14 @@ discovered on interop day.
 
 > Hi! We are the group doing the chat in C (repository Future_Networks). For
 > M3 we have the full protocol implemented and tested (`docs/PROTOCOL.md`,
-> v0.5). Most of it is fixed by the slides; only a few points really need
-> agreeing (`docs/DECISIONS.md`, section A):
+> v0.6), already agreed with one group. Most of it is fixed by the slides;
+> only a few points really need agreeing (`docs/DECISIONS.md`, section A):
 >
-> 1. Which requests get an `OK`? Our reading of *"Last request accepted"*: `NICK` and `QUIT` get `OK`; `MSG`/`PRIV` are confirmed by the `CHAT` itself and `LIST` by the `USERS`.
-> 2. Does the sender of a `MSG` receive its own `CHAT`, and the sender of a `PRIV` a copy? (us: yes and yes, so clients do not echo locally)
-> 3. Limits, in bytes: lines up to 4096 (including `\n`), nick 1–32 with no spaces, `"` or `\`, text 1–1024?
-> 4. Do your receivers ignore unknown fields? (we add `"to"` to private `CHAT`s)
+> 1. Which requests get an `OK`? Our reading of *"Last request accepted"*: every accepted request (`NICK`, `MSG`, `PRIV`, `QUIT`) gets an `OK`, always before the `CHAT`; `LIST` gets its `USERS`.
+> 2. The sender of a `MSG` receives its own `CHAT` (so no local echo); the sender of a `PRIV` gets only the `OK`, no copy (echo it locally if you want).
+> 3. Limits: lines up to 64 KiB including `\n` (`ERROR 413` and close above it); text 1–4096 bytes, multi-line allowed (`ERROR 400 "text too long"` above it, connection stays open).
+> 4. Nicks: 1–32 bytes, no spaces, `"` or `\`?
+> 5. Receivers ignore unknown fields?
 >
 > Our server accepts IPv4 and IPv6 on port 5000. We also have plain-text test
 > scenarios that run against any server (`python3 scripts/interop.py <ip>

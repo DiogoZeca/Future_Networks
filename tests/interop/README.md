@@ -46,13 +46,20 @@ b< {"type":"ERROR","code":409}
 | `05_campos_extra` | campos desconhecidos ignorados; `from` do cliente não conta |
 | `06_utf8_e_escapes` | UTF-8 partido entre `recv()` (no modo byte a byte) e escapes |
 | `07_nick_em_uso` | 409, também com outras maiúsculas (D18); depois do 409 entra com outro nick (D19) |
-| `08_priv` | o destino recebe o privado, o emissor a cópia (D14), um terceiro nada |
+| `08_priv` | o emissor recebe o `OK`, o destino o privado; nem o emissor (sem cópia, D14) nem um terceiro recebem o `CHAT` |
 | `09_priv_inexistente` | `PRIV` para quem não está → 404 (D15); a ligação continua |
 | `10_list` | `USERS` com quem pediu, ordenado, sem quem ainda não fez `NICK` (D16) |
 | `11_quit` | `QUIT` → `OK` + fecho; os outros veem `"rui left"` (D17) |
 | `12_m3_antes_de_nick` | `LIST`/`PRIV` antes do `NICK` → 401; `QUIT` → `OK` + fecho |
+| `13_varias_linhas` | `MSG` com `\n` e `\t` → `OK` + `CHAT` igual; texto vazio → 400 |
+| `14_text_too_long` | 4096 bytes passam; 4097 → 400 `"text too long"`, e a ligação continua |
 
-Os cenários 01–03 dependem de D5/D6 e o 02 do código 401; os 07–12 das
-decisões D13–D19 — enquanto estiverem *PROPOSTA* no `PROTOCOL.md`, uma falha
-contra outro grupo pode ser uma decisão diferente e não um bug. O
-[`docs/DECISIONS.md`](../../docs/DECISIONS.md) diz qual.
+Desde a revisão do M3 (acordo com o grupo 1) todo o pedido aceite recebe `OK`
+antes do `CHAT` (D13), por isso os cenários com `MSG`/`PRIV` esperam primeiro
+o `OK`.
+
+Os cenários dependem das decisões do `PROTOCOL.md`. As que estão **AGREED**
+com um grupo (`OK`, eco do `MSG`, sem cópia do `PRIV`, limites) devem passar
+contra o servidor desse grupo; as que ainda são **PROPOSTA** (ex.: maiúsculas
+no 07, a ordem do `USERS` no 10) podem falhar por uma decisão diferente e não
+por um bug. O [`docs/DECISIONS.md`](../../docs/DECISIONS.md) diz qual.

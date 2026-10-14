@@ -165,8 +165,25 @@ def run(host, port, steps, mode):
                     return err
     finally:
         for sock, _ in conns.values():
-            sock.close()
+            close_and_wait(sock)
     return None
+
+
+def close_and_wait(sock):
+    """Fecha de forma ordeira e espera que o SERVIDOR feche (max 1 s).
+
+    Com nicks unicos (M3), fechar e passar logo ao cenario seguinte dava
+    409 de vez em quando: o cenario seguinte voltava a pedir "ana" antes de o
+    servidor ter dado pela saida da anterior. Mandar FIN (shutdown) e esperar
+    pelo fecho do outro lado garante que o servidor ja libertou o nick."""
+    try:
+        sock.shutdown(socket.SHUT_WR)
+        sock.settimeout(1.0)
+        while sock.recv(4096):
+            pass
+    except OSError:
+        pass
+    sock.close()
 
 
 def main():

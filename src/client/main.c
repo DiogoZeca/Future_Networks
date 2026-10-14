@@ -53,6 +53,18 @@
  *     servidor que não feche ao receber o QUIT, o shutdown(SHUT_WR) a seguir
  *     garante na mesma o fim da ligação.
  *
+ * REVISÃO DO M3 (acordo com o primeiro grupo)
+ * -------------------------------------------
+ *   - Os OK não se mostram. O servidor manda OK a cada pedido aceite (D13),
+ *     mas o cliente não espera por eles: envia e continua a ler o teclado. Só
+ *     o OK ao NICK interessa (do_nick); os outros são ignorados quando chegam.
+ *   - Eco LOCAL do /msg: o servidor já não devolve cópia do PRIV (D14), por
+ *     isso o cliente mostra ele próprio "<ana -> rui> (privado) ...". Se o
+ *     destino não existir, o ERROR 404 aparece logo a seguir.
+ *   - Tolerante a receber: uma linha maior do que 64 KiB vinda do servidor é
+ *     DESCARTADA com um aviso (rxbuf_init_lenient), em vez de fechar o
+ *     cliente; texto de várias linhas é mostrado indentado e limpo (ui.c).
+ *
  * Uso: ./bin/client <host> [porta] [nick]   (sem nick, é pedido ao arrancar)
  */
 #include "framing.h"
@@ -101,8 +113,13 @@ static int read_line(int fd, char *line, size_t *len)
         int r = rxbuf_next_line(&rx, line, RX_LINE_BUF, len);
         if (r == RX_LINE)
             return 1;
-        if (r != RX_NEED) {
-            fprintf(stderr, "[client] o servidor mandou uma linha demasiado longa\n");
+        if (r == RX_SKIPPED) {              /* modo tolerante: avisar e seguir */
+            fprintf(stderr, "[client] o servidor mandou uma linha com mais de %d "
+                            "bytes: descartada\n", RX_MAX_LINE);
+            continue;
+        }
+        if (r != RX_NEED) {                 /* RX_FAULT: bug nosso */
+            fprintf(stderr, "[client] BUG: rxbuf_next_line = %d\n", r);
             return -1;
         }
 
@@ -121,19 +138,29 @@ static int read_line(int fd, char *line, size_t *len)
     }
 }
 
-/* Mostra uma linha recebida. Devolve a mensagem em *m (type 0 se inválida). */
+/* Mostra uma linha recebida. Devolve a mensagem em *m (type 0 se inválida).
+ *
+ * Os OK não se mostram (revisão do M3): chegam a cada pedido aceite e não
+ * dizem nada ao utilizador. Quem precisa de um (do_nick) olha para *m. */
 static void show_line(const char *line, size_t len, struct msg *m)
 {
     struct proto_err err;
-    char             text[PROTO_LINE_BUF];
+    static char      text[PROTO_LINE_BUF];   /* 64 KiB: fora da stack */
 
     if (proto_parse(line, len, m, &err) != 0) {
         /* Ex.: um servidor de outro grupo com uma extensão que não
-         * conhecemos. Mostrar em bruto em vez de rebentar ou esconder. */
-        printf("[servidor mandou mensagem nao suportada (%s)] %.*s\n",
-               err.reason, (int)len, line);
+         * conhecemos. Mostrar em bruto em vez de rebentar ou esconder — mas
+         * curto e sem caracteres de controlo (podiam mexer no terminal). */
+        printf("[servidor mandou mensagem nao suportada (%s)] ", err.reason);
+        for (size_t i = 0; i < len && i < 200; i++) {
+            unsigned char c = (unsigned char)line[i];
+            putchar(c < 0x20 || c == 0x7F ? '?' : c);
+        }
+        printf("%s\n", len > 200 ? "..." : "");
         return;
     }
+    if (m->type == MT_OK)
+        return;
     ui_format(m, text, sizeof text);
     printf("%s\n", text);
 }
@@ -166,7 +193,7 @@ static int send_msg(int fd, const struct msg *m)
 static void *reader_thread(void *arg)
 {
     int         fd = *(int *)arg;
-    static char line[RX_LINE_BUF];           /* 4 KB: fora da stack da thread */
+    static char line[RX_LINE_BUF];           /* 64 KiB: fora da stack da thread */
     size_t      len;
     struct msg  m;
 
@@ -297,7 +324,9 @@ int main(int argc, char *argv[])
     struct timeval tv = { .tv_sec = REPLY_TIMEOUT_S, .tv_usec = 0 };
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
 
-    rxbuf_init(&rx);
+    /* Tolerante: uma linha longa de mais vinda do servidor é descartada, não
+     * fecha o cliente (o servidor, esse, continua estrito: D2). */
+    rxbuf_init_lenient(&rx);
     int status = EXIT_FAILURE;
 
     /* 1. NICK tem de ser a primeira mensagem (slide 124). */
@@ -357,10 +386,26 @@ int main(int argc, char *argv[])
             break;
         }
 
-        /* Sem eco local: o servidor devolve-nos o nosso CHAT (D5) e a cópia
-         * de cada PRIV (D14). Se o imprimíssemos também, aparecia duplicado. */
+        /* MSG: sem eco local, o servidor devolve-nos o nosso CHAT (D5) — se o
+         * imprimíssemos também, aparecia duplicado. */
         if (send_msg(fd, &m) != 0)
             break;
+
+        /* PRIV: o servidor NÃO devolve cópia (D14, revisão do M3), por isso o
+         * eco é local. Um CHAT com `to` preenchido nunca vem do fio, e o
+         * ui_format mostra-o como "<eu -> destino> (privado) ...". */
+        if (m.type == MT_PRIV) {
+            static struct msg echo;
+            static char       shown[PROTO_LINE_BUF];
+            memset(&echo, 0, sizeof echo);
+            echo.type       = MT_CHAT;
+            echo.is_private = 1;
+            snprintf(echo.from, sizeof echo.from, "%s", nick.nick);
+            memcpy(echo.to,   m.to,      sizeof echo.to);
+            memcpy(echo.text, m.text,    sizeof echo.text);
+            ui_format(&echo, shown, sizeof shown);
+            printf("%s\n", shown);
+        }
     }
 
     /* 4. Fim (/quit ou EOF no teclado). No EOF manda-se também o QUIT (D17):

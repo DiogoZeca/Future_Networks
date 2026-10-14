@@ -6,6 +6,13 @@ porquê cada decisão** — é o material para a defesa desta parte do M1.
 > **Estado actual:** implementado. `make test` e `make test SAN=1` dão
 > **119 ok, 0 falhas** (16 casos). Testes escritos antes do código (§4) e
 > validados com testes de mutação (§8).
+>
+> **Desde a revisão do M3** a linha máxima é **64 KiB** (`RX_MAX_LINE = 65536`,
+> `RX_CAP = 69632`), acordada com o primeiro grupo, e há um **modo tolerante**
+> para o cliente (`rxbuf_init_lenient`: descarta uma linha longa até ao `\n`
+> em vez de envenenar o buffer). Os números deste documento (4096, 8192) são
+> os do M1; o raciocínio é o mesmo com os novos — ver `include/framing.h` e
+> `milestones/M3.md`.
 
 ---
 

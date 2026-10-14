@@ -72,7 +72,7 @@ static size_t handle_list(struct session *s, struct sess_out *out)
     return 1;
 }
 
-/* PRIV → CHAT privado (D14, D15). */
+/* PRIV → OK ao emissor + CHAT privado ao destino (D13, D14, D15). */
 static size_t handle_priv(struct session *s, const struct msg *in,
                           struct sess_out *out, size_t cap)
 {
@@ -80,35 +80,27 @@ static size_t handle_priv(struct session *s, const struct msg *in,
 
     /* "Existe?" no instante do pedido. Se o destino sair entre esta pergunta
      * e o envio, a mensagem perde-se sem erro — como um CHAT para quem saiu
-     * a meio de um broadcast. O emissor recebe a cópia na mesma. */
+     * a meio de um broadcast. O pedido foi aceite (OK) na mesma. */
     if (!s->dir->lookup(s->dir->ctx, in->to, to))
         return only_error(out, 404, SESS_R_NO_SUCH_NICK);
 
-    struct sess_out chat;
-    memset(&chat, 0, sizeof chat);
-    chat.msg.type       = MT_CHAT;
-    chat.msg.is_private = 1;
-    /* from da SESSÃO (como no MSG); to como foi REGISTADO, não como o
-     * emissor o escreveu: "/msg ANA" chega como "to":"ana" (D18). */
-    memcpy(chat.msg.from, s->nick, sizeof chat.msg.from);
-    memcpy(chat.msg.to,   to,      sizeof chat.msg.to);
-    memcpy(chat.msg.text, in->text, sizeof chat.msg.text);
-
-    /* A si próprio: uma só entrega, senão o emissor via-a duas vezes. */
-    if (proto_nick_eq(to, s->nick)) {
-        chat.dest = SESS_SELF;
-        out[0]    = chat;
-        return 1;
-    }
-
-    /* Primeiro ao destino, depois a cópia ao emissor: quando a cópia chega,
-     * a entrega ao destino já foi tentada. */
-    chat.dest = SESS_TO;
-    out[0]    = chat;
+    fill_self(&out[0], MT_OK);              /* D13: o OK vai primeiro */
     if (cap < 2)
         return 1;
-    chat.dest = SESS_SELF;
-    out[1]    = chat;
+
+    memset(&out[1], 0, sizeof out[1]);
+    out[1].msg.type       = MT_CHAT;
+    out[1].msg.is_private = 1;
+    /* from da SESSÃO (como no MSG). O msg.to (como foi REGISTADO: "/msg ANA"
+     * encontra "ana", D18) só diz ao main.c para onde encaminhar: não vai
+     * para o fio (protocol.c). */
+    memcpy(out[1].msg.from, s->nick, sizeof s->nick);   /* from é maior: ver protocol.h */
+    memcpy(out[1].msg.to,   to,      sizeof out[1].msg.to);
+    memcpy(out[1].msg.text, in->text, sizeof out[1].msg.text);
+
+    /* D14: só o destino recebe o CHAT, nunca uma cópia ao emissor. A si
+     * próprio, o destino É o emissor: SELF, para não ir pelo roster. */
+    out[1].dest = proto_nick_eq(to, s->nick) ? SESS_SELF : SESS_TO;
     return 2;
 }
 
@@ -156,18 +148,23 @@ size_t session_handle(struct session *s, const char *line, size_t len,
         if (s->state != SESS_READY)
             return only_error(out, 401, SESS_R_NICK_REQUIRED);  /* #17 */
 
-        memset(&out[0], 0, sizeof out[0]);
+        /* D13: OK primeiro (o pedido foi aceite), depois o CHAT. */
+        fill_self(&out[0], MT_OK);
+        if (cap < 2)
+            return 1;
+
+        memset(&out[1], 0, sizeof out[1]);
         /* SESS_ALL e não SESS_OTHERS: o emissor recebe o seu próprio CHAT
-         * (D5). É isso que lhe confirma que a mensagem chegou ao servidor, e é
-         * por isso que o cliente não deve ecoar localmente o que escreve. */
-        out[0].dest             = SESS_ALL;
-        out[0].msg.type         = MT_CHAT;
-        out[0].msg.is_private   = 0;
+         * (D5) — é por isso que o cliente não deve ecoar localmente o que
+         * escreve para todos. */
+        out[1].dest             = SESS_ALL;
+        out[1].msg.type         = MT_CHAT;
+        out[1].msg.is_private   = 0;
         /* O `from` vem da SESSÃO, nunca do que o cliente mandou: senão
          * qualquer um se fazia passar por outro. */
-        memcpy(out[0].msg.from, s->nick, sizeof out[0].msg.from);
-        memcpy(out[0].msg.text, in.text, sizeof out[0].msg.text);
-        return 1;
+        memcpy(out[1].msg.from, s->nick, sizeof s->nick);   /* from é maior */
+        memcpy(out[1].msg.text, in.text, sizeof out[1].msg.text);
+        return 2;
 
     case MT_PRIV:
         if (s->state != SESS_READY)

@@ -30,7 +30,12 @@ o fecho (`< CLOSED`) e salta os `EVENT` que não estiver à espera — formato e
 `tests/interop/README.md`.
 
 Ao contrário do `probe_m0.py`, este é passa/falha: devolve `0` se tudo passou.
-Resultado atual contra o nosso servidor: **36 ok, 0 falhas** (12 cenários × 3 modos).
+Resultado atual contra o nosso servidor: **42 ok, 0 falhas** (14 cenários × 3 modos).
+
+No fim de cada cenário o script fecha com FIN e **espera que o servidor feche**
+do lado dele (no máximo 1 s). Sem isso, como todos os cenários usam o nick
+"ana", o cenário seguinte às vezes pedia "ana" antes de o servidor ter dado
+pela saída do anterior, e levava um `409` falso (M3.md, P33).
 
 ---
 
@@ -93,11 +98,12 @@ python3 scripts/probe_m3.py
 |---|---|---|
 | 1 | 50 rondas de 8 `NICK` iguais no mesmo instante | sempre 1 `OK` e 7 × `409` (verificar e reservar é atómico) |
 | 2 | `ANA` com `ana` ligada, depois outro nick na mesma ligação | 409 sem olhar a maiúsculas; a ligação continua |
-| 3 | `PRIV` para alguém, a si próprio, para quem não existe | só o destino recebe, a cópia volta, 404 |
-| 4 | 1500 `PRIV` para quem entra e sai sem parar | só cópias ou 404; o servidor sobrevive |
+| 3 | `PRIV` para alguém, a si próprio, para quem não existe | o emissor recebe só o `OK`, só o destino recebe o `CHAT`; 404 |
+| 4 | 1500 `PRIV` para quem entra e sai sem parar | só `OK` ou 404; o servidor sobrevive |
 | 5 | 64 clientes com nicks de 32 bytes e um `LIST` | 64 nicks ordenados numa linha |
 | 6 | `QUIT` e um `MSG` colados | `OK`, fecho, `left` aos outros, o `MSG` ignorado, nick livre |
-| 7 | o nosso `./bin/client` com o stdin preparado | 409 → pede outro nick, `/list`, `/msg`, `/lsit` recusado, `/quit` |
+| 7 | o nosso `./bin/client` com o stdin preparado | 409 → pede outro nick, `/list`, `/msg` com eco local, `/lsit` recusado, sem `[ok]` no ecrã, `/quit` |
+| 8 | linhas de 64 KiB e 64 KiB + 1; texto de várias linhas com `\033` | 400 `text too long` vs 413 + fecho; o texto chega igual; o nosso cliente mostra-o limpo |
 
 Atenção a um pormenor do Python que enganou a primeira versão: `sock.close()`
 não fecha a ligação enquanto houver um `sock.makefile()` aberto sobre ela

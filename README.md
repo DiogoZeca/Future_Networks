@@ -15,7 +15,7 @@ falta acordar com os outros grupos está em [`docs/DECISIONS.md`](docs/DECISIONS
 | M0 | Echo warm-up           | DONE |
 | M1 | Framing + protocolo    | DONE |
 | M2 | Vários clientes        | DONE |
-| M3 | Comandos + spec        | DONE (falta acordo e interop com outros grupos) |
+| M3 | Comandos + spec        | DONE (semântica acordada com o grupo 1; falta o teste cruzado e mais grupos) |
 | M4 | Robustez e testes      | TODO |
 | M5 | Descoberta UDP         | TODO |
 | M6 | Extensão               | TODO |

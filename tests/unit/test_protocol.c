@@ -9,7 +9,9 @@
  * de NICK", é da máquina de estados do servidor e é testado com ela);
  * 25-31 foram acrescentados ao desenhar o contrato; 32 (e a 2.a verificacao
  * do 12) nasceram de testes de mutacao. 33 e do M2 (EVENT); 58-62 do M3
- * (PRIV, LIST, QUIT, USERS, CHAT.to, regra de nicks, comparacao de nicks).
+ * (PRIV, LIST, QUIT, USERS, regra de nicks, comparacao de nicks); 81-82 da
+ * revisao do M3 (text ate 4096 com varias linhas, "text too long", receber
+ * de forma tolerante). O 60 ficou a provar que o CHAT ja NAO leva "to".
  */
 #include "protocol.h"
 #include "test_util.h"
@@ -205,18 +207,22 @@ static void caso_26_limites(void)
     CASE(26, "nick com tab (escape JSON) -> 400");
     CHECK_INT(parse("{\"type\":\"NICK\",\"nick\":\"a\\tb\"}"), -1);
 
-    CASE(26, "text com 1024 bytes aceite");
+    CASE(26, "text com PROTO_TEXT_MAX (4096) bytes aceite");
     CHECK_INT(parse(json_with("MSG", "text", 't', PROTO_TEXT_MAX)), 0);
     CHECK_INT(strlen(m.text), PROTO_TEXT_MAX);
 
-    CASE(26, "text com 1025 bytes -> 400");
+    CASE(26, "text com 4097 bytes -> 400 \"text too long\" (revisao do M3)");
     CHECK_INT(parse(json_with("MSG", "text", 't', PROTO_TEXT_MAX + 1)), -1);
+    CHECK_STR(err.reason, PROTO_R_TEXT_LONG);
 
-    CASE(26, "text vazio -> 400");
+    CASE(26, "text vazio -> 400 invalid field (continua proibido)");
     CHECK_INT(parse("{\"type\":\"MSG\",\"text\":\"\"}"), -1);
+    CHECK_STR(err.reason, PROTO_R_FIELD);
 
-    CASE(26, "text com \\n (escape JSON) -> 400: sem mensagens multi-linha");
-    CHECK_INT(parse("{\"type\":\"MSG\",\"text\":\"a\\nb\"}"), -1);
+    /* Ate a revisao do M3 isto era 400 ("sem mensagens multi-linha"). */
+    CASE(26, "text com \\n (escape JSON) aceite: mensagens de varias linhas");
+    CHECK_INT(parse("{\"type\":\"MSG\",\"text\":\"a\\nb\"}"), 0);
+    CHECK_STR(m.text, "a\nb");
 
     CASE(26, "text UTF-8 conta BYTES: \"ola\" com acento = 4");
     CHECK_INT(parse("{\"type\":\"MSG\",\"text\":\"ol\xC3\xA1\"}"), 0);
@@ -224,21 +230,24 @@ static void caso_26_limites(void)
 }
 
 /* 27. O pior caso do encode, que justifica o _Static_assert do protocol.h:
- *     from/to e text no limite, o text cheio de caracteres que o cJSON escapa
- *     (2x). Desde o M3 (D20) os nicks ja nao podem ter '"' nem '\\', por isso
- *     o from deixou de crescer; em troca o CHAT privado ganhou o "to".
+ *     from e text no limite, o text cheio do caracter que o cJSON mais faz
+ *     crescer. Desde a revisao do M3 o text pode ter caracteres de controlo,
+ *     e o '\001' vira "\u0001": 6 bytes por cada um (antes o pior eram as
+ *     aspas, 2x). Os nicks (D20) nao crescem.
  *     Tem de caber numa linha do framing e ter UM so '\n', no fim. */
 static void caso_27_pior_caso_encode(void)
 {
     CASE(27, "pior CHAT cabe numa linha e tem um so '\\n'");
-    struct msg c = { .type = MT_CHAT, .is_private = 1 };
+    static struct msg c;
+    memset(&c, 0, sizeof c);
+    c.type = MT_CHAT;
+    c.is_private = 1;
     memset(c.from, 'f',  PROTO_NICK_MAX);
-    memset(c.to,   't',  PROTO_NICK_MAX);
-    memset(c.text, '\\', PROTO_TEXT_MAX);
+    memset(c.text, '\001', PROTO_TEXT_MAX);
     size_t len = 0;
     CHECK_INT(proto_encode(&c, out, sizeof out, &len), 0);
     CHECK(len <= RX_MAX_LINE);
-    CHECK_INT(len, PROTO_CHAT_OVERHEAD + 2 * PROTO_NICK_MAX + 2 * PROTO_TEXT_MAX - 1); /* "true" e 1 mais curto que "false" */
+    CHECK_INT(len, PROTO_CHAT_OVERHEAD + PROTO_NICK_MAX + PROTO_ESCAPE_MAX * PROTO_TEXT_MAX - 1); /* "true" e 1 mais curto que "false" */
     CHECK(len >= 1 && memchr(out, '\n', sem_nl(len)) == NULL);
     CHECK_INT(out[sem_nl(len)], '\n');
 
@@ -246,12 +255,11 @@ static void caso_27_pior_caso_encode(void)
     CHECK_INT(proto_parse(out, sem_nl(len), &m, &err), 0);
     CHECK_INT(m.type, MT_CHAT);
     CHECK_MEM(m.from, c.from, PROTO_NICK_MAX + 1);
-    CHECK_MEM(m.to,   c.to,   PROTO_NICK_MAX + 1);
     CHECK_MEM(m.text, c.text, PROTO_TEXT_MAX + 1);
     CHECK_INT(m.is_private, 1);
 
     CASE(27, "encode recusa o que o parse recusaria");
-    struct msg bad = { .type = MT_MSG, .text = "a\nb" };
+    struct msg bad = { .type = MT_MSG };                   /* text vazio */
     CHECK_INT(proto_encode(&bad, out, sizeof out, &len), -1);
     struct msg bad2 = { .type = MT_NICK };                 /* nick vazio */
     CHECK_INT(proto_encode(&bad2, out, sizeof out, &len), -1);
@@ -408,11 +416,14 @@ static void caso_33_event(void)
     CHECK_INT(parse("{\"type\":\"EVENT\"}"), -1);
     CHECK_STR(err.reason, PROTO_R_FIELD);
 
-    CASE(33, "EVENT com \"text\" vazio -> 400 (text tem minimo 1)");
-    CHECK_INT(parse("{\"type\":\"EVENT\",\"text\":\"\"}"), -1);
+    /* Ate a revisao do M3 estes dois eram 400. Um EVENT vem de um SERVIDOR:
+     * tolerante a receber (ver #82). */
+    CASE(33, "EVENT com \"text\" vazio e aceite (vem de um servidor)");
+    CHECK_INT(parse("{\"type\":\"EVENT\",\"text\":\"\"}"), 0);
 
-    CASE(33, "EVENT com '\\n' no texto -> 400: partiria a linha no receptor");
-    CHECK_INT(parse("{\"type\":\"EVENT\",\"text\":\"a\\nb\"}"), -1);
+    CASE(33, "EVENT com '\\n' no texto e aceite (o JSON escapa-o)");
+    CHECK_INT(parse("{\"type\":\"EVENT\",\"text\":\"a\\nb\"}"), 0);
+    CHECK_STR(m.text, "a\nb");
 
     CASE(33, "\"event\" em minusculas nao e EVENT");
     CHECK_INT(parse("{\"type\":\"event\",\"text\":\"x\"}"), -1);
@@ -421,10 +432,14 @@ static void caso_33_event(void)
     CASE(33, "proto_type_name(MT_EVENT)");
     CHECK_STR(proto_type_name(MT_EVENT), "EVENT");
 
-    CASE(33, "text no limite (1024) ainda cabe numa linha");
+    CASE(33, "text no limite (4096) ainda cabe numa linha");
     CHECK_INT(parse(json_with("EVENT", "text", 'e', PROTO_TEXT_MAX)), 0);
     CHECK_INT(proto_encode(&m, out, sizeof out, &len), 0);
-    CHECK_INT(parse(json_with("EVENT", "text", 'e', PROTO_TEXT_MAX + 1)), -1);
+
+    CASE(33, "acima do limite: aceite e cortado (tolerante), mas nao se reenvia assim");
+    CHECK_INT(parse(json_with("EVENT", "text", 'e', PROTO_TEXT_MAX + 1)), 0);
+    CHECK_INT(m.truncated, 1);
+    CHECK_INT(strlen(m.text), PROTO_TEXT_MAX);
 }
 
 
@@ -556,25 +571,21 @@ static void caso_59_users(void)
     CHECK_INT(m.n_nicks, 300);
 }
 
-/* 60. CHAT privado com "to" (D14, extensao nossa). */
-static void caso_60_chat_to(void)
+/* 60. O CHAT privado NAO leva "to" (revisao do M3: era a extensao D14, e
+ *     acabou junto com a copia ao emissor). O m.to so encaminha. */
+static void caso_60_chat_sem_to(void)
 {
     size_t len;
 
-    CASE(60, "CHAT privado leva \"to\"");
+    CASE(60, "CHAT privado: exatamente os campos do slide, mesmo com m.to preenchido");
     struct msg c = { .type = MT_CHAT, .from = "ana", .to = "rui", .text = "hi", .is_private = 1 };
     CHECK_INT(proto_encode(&c, out, sizeof out, &len), 0);
-    CHECK_STR(out, "{\"type\":\"CHAT\",\"from\":\"ana\",\"to\":\"rui\",\"text\":\"hi\",\"private\":true}\n");
-    CHECK_INT(proto_parse(out, sem_nl(len), &m, &err), 0);
-    CHECK_STR(m.to, "rui");
-    CHECK_INT(m.is_private, 1);
+    CHECK_STR(out, "{\"type\":\"CHAT\",\"from\":\"ana\",\"text\":\"hi\",\"private\":true}\n");
 
-    CASE(60, "CHAT sem \"to\" (o do slide, ou de outro grupo) -> to = \"\"");
-    CHECK_INT(parse("{\"type\":\"CHAT\",\"from\":\"ana\",\"text\":\"hi\",\"private\":true}"), 0);
+    CASE(60, "um \"to\" mandado por outro servidor e so um campo desconhecido");
+    CHECK_INT(parse("{\"type\":\"CHAT\",\"from\":\"ana\",\"to\":\"rui\",\"text\":\"hi\",\"private\":true}"), 0);
     CHECK_STR(m.to, "");
-
-    CASE(60, "\"to\" presente mas nao-string -> 400 (como o \"private\")");
-    CHECK_INT(parse("{\"type\":\"CHAT\",\"from\":\"ana\",\"text\":\"hi\",\"to\":1}"), -1);
+    CHECK_INT(parse("{\"type\":\"CHAT\",\"from\":\"ana\",\"text\":\"hi\",\"to\":1}"), 0);
 }
 
 /* 61. Regra de nicks (D20): estrita a enviar, larga a receber. */
@@ -597,6 +608,22 @@ static void caso_61_regra_de_nicks(void)
     CASE(61, "... e um USERS tambem");
     CHECK_INT(parse("{\"type\":\"USERS\",\"nicks\":[\"a\\\\b\"]}"), 0);
     CHECK_STR(m.nicks, "a\\b");
+
+    CASE(61, "um from de outro servidor pode ter ate 128 bytes (32 caracteres UTF-8)");
+    {
+        char nk[PROTO_PEER_NICK_MAX + 2];
+        int k = 0;
+        for (int i = 0; i < 32; i++) {              /* 32 x 4 bytes = 128 */
+            nk[k++] = '\xF0'; nk[k++] = '\x9F'; nk[k++] = '\x98'; nk[k++] = '\x80';
+        }
+        nk[k] = '\0';
+        snprintf(big, sizeof big, "{\"type\":\"CHAT\",\"from\":\"%s\",\"text\":\"oi\"}", nk);
+        CHECK_INT(parse(big), 0);
+        CHECK_INT(strlen(m.from), PROTO_PEER_NICK_MAX);
+        snprintf(big, sizeof big, "{\"type\":\"CHAT\",\"from\":\"%sx\",\"text\":\"oi\"}", nk);
+        CHECK_INT(parse(big), -1);                  /* 129: nem a receber */
+        CHECK_INT(proto_valid_nick(nk), 0);         /* e o NOSSO limite continua 32 */
+    }
 
     CASE(61, "mas espacos no from continuam proibidos: partiriam o USERS e o /msg");
     CHECK_INT(parse("{\"type\":\"CHAT\",\"from\":\"a b\",\"text\":\"oi\"}"), -1);
@@ -632,6 +659,90 @@ static void caso_62_nick_eq(void)
     CHECK_INT(proto_nick_cmp("ana", "ana"), 0);
 }
 
+
+/* ---- Revisao do M3 ------------------------------------------------------ */
+
+/* 81. text de um PEDIDO (MSG, PRIV): 1..4096 bytes, varias linhas, e
+ *     "text too long" (400, a ligacao continua) acima disso. */
+static void caso_81_text_dos_pedidos(void)
+{
+    size_t len;
+
+    CASE(81, "PRIV com text acima de 4096 -> 400 \"text too long\"");
+    snprintf(big, sizeof big, "{\"type\":\"PRIV\",\"to\":\"rui\",\"text\":\"");
+    size_t k = strlen(big);
+    memset(big + k, 'p', PROTO_TEXT_MAX + 1);
+    strcpy(big + k + PROTO_TEXT_MAX + 1, "\"}");
+    CHECK_INT(parse(big), -1);
+    CHECK_STR(err.reason, PROTO_R_TEXT_LONG);
+    CHECK_INT(err.code, 400);
+
+    CASE(81, "PRIV com text vazio -> invalid field");
+    CHECK_INT(parse("{\"type\":\"PRIV\",\"to\":\"rui\",\"text\":\"\"}"), -1);
+    CHECK_STR(err.reason, PROTO_R_FIELD);
+
+    CASE(81, "o limite e em BYTES depois do UTF-8: 2048 x 'a com acento' = 4096 passa, +1 nao");
+    k = (size_t)snprintf(big, sizeof big, "{\"type\":\"MSG\",\"text\":\"");
+    for (int i = 0; i < PROTO_TEXT_MAX / 2; i++) { big[k++] = '\xC3'; big[k++] = '\xA1'; }
+    strcpy(big + k, "\"}");
+    CHECK_INT(parse(big), 0);
+    CHECK_INT(strlen(m.text), PROTO_TEXT_MAX);
+    strcpy(big + k, "x\"}");
+    CHECK_INT(parse(big), -1);
+    CHECK_STR(err.reason, PROTO_R_TEXT_LONG);
+
+    CASE(81, "varias linhas: o encode escapa o '\\n' e a linha continua a ser UMA");
+    struct msg g = { .type = MT_MSG, .text = "linha 1\nlinha 2\ttab" };
+    CHECK_INT(proto_encode(&g, out, sizeof out, &len), 0);
+    CHECK_STR(out, "{\"type\":\"MSG\",\"text\":\"linha 1\\nlinha 2\\ttab\"}\n");
+    CHECK(memchr(out, '\n', sem_nl(len)) == NULL);
+    CHECK_INT(proto_parse(out, sem_nl(len), &m, &err), 0);
+    CHECK_STR(m.text, "linha 1\nlinha 2\ttab");
+}
+
+/* 82. Receber de forma tolerante: o que um SERVIDOR manda e mostrado, cortado
+ *     se for preciso, em vez de recusado inteiro. */
+static void caso_82_receber_tolerante(void)
+{
+    CASE(82, "CHAT com text vazio e aceite");
+    CHECK_INT(parse("{\"type\":\"CHAT\",\"from\":\"ana\",\"text\":\"\",\"private\":false}"), 0);
+    CHECK_STR(m.text, "");
+    CHECK_INT(m.truncated, 0);
+
+    CASE(82, "CHAT com text de 6000 bytes: aceite, cortado aos 4096 e marcado");
+    CHECK_INT(parse(json_with("CHAT\",\"from\":\"ana", "text", 'c', 6000)), 0);
+    CHECK_INT(strlen(m.text), PROTO_TEXT_MAX);
+    CHECK_INT(m.truncated, 1);
+
+    CASE(82, "o corte nao parte um caracter UTF-8 a meio");
+    size_t k = (size_t)snprintf(big, sizeof big, "{\"type\":\"CHAT\",\"from\":\"ana\",\"text\":\"");
+    memset(big + k, 'a', PROTO_TEXT_MAX - 1);              /* 4095 'a' */
+    k += PROTO_TEXT_MAX - 1;
+    big[k++] = '\xC3'; big[k++] = '\xA1';                  /* + 2 bytes = 4097 */
+    strcpy(big + k, "\"}");
+    CHECK_INT(parse(big), 0);
+    CHECK_INT(strlen(m.text), PROTO_TEXT_MAX - 1);         /* recua: nao fica meio "a" */
+    CHECK_INT(m.truncated, 1);
+
+    CASE(82, "reason de 300 bytes num ERROR: aceite, cortado aos 128");
+    CHECK_INT(parse(json_with("ERROR\",\"code\":400,\"x\":\"", "reason", 'r', 300)), 0);
+    CHECK_INT(strlen(m.reason), PROTO_REASON_MAX);
+    CHECK_INT(m.truncated, 1);
+
+    CASE(82, "USERS com 400 nicks de 32 bytes (servidor federado): guarda os que cabem");
+    k = (size_t)snprintf(big, sizeof big, "{\"type\":\"USERS\",\"nicks\":[");
+    for (int i = 0; i < 400; i++)
+        k += (size_t)snprintf(big + k, sizeof big - k, "%s\"%032d\"", i ? "," : "", i);
+    snprintf(big + k, sizeof big - k, "]}");
+    CHECK_INT(parse(big), 0);
+    CHECK_INT(m.truncated, 1);
+    CHECK(m.n_nicks > PROTO_USERS_MAX && m.n_nicks < 400);
+    CHECK(strlen(m.nicks) < PROTO_NICKS_BUF);
+
+    CASE(82, "mas um PEDIDO continua estrito: MSG com text de 6000 -> 400");
+    CHECK_INT(parse(json_with("MSG", "text", 'm', 6000)), -1);
+}
+
 /* ------------------------------------------------------------------------ */
 
 int main(void)
@@ -654,8 +765,10 @@ int main(void)
     caso_33_event();
     caso_58_pedidos_m3();
     caso_59_users();
-    caso_60_chat_to();
+    caso_60_chat_sem_to();
     caso_61_regra_de_nicks();
     caso_62_nick_eq();
+    caso_81_text_dos_pedidos();
+    caso_82_receber_tolerante();
     return t_report("protocol");
 }

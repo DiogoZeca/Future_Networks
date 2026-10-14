@@ -39,14 +39,20 @@ static int valid_str(const char *s, size_t min, size_t max, const char *banned)
  * Sem ' ' (o /msg e o USERS partem por espaço) e sem '"' nem '\\' (o JSON
  * escapava-os para 2 bytes e o pior USERS deixava de caber numa linha). */
 int proto_valid_nick(const char *s)    { return valid_str(s, 1, PROTO_NICK_MAX, " \"\\"); }
-int proto_valid_text(const char *s)    { return valid_str(s, 1, PROTO_TEXT_MAX, NULL); }
+/* text: 1..4096 bytes, e desde a revisão do M3 PODE ter caracteres de
+ * controlo (mensagens de várias linhas). Só o tamanho conta. */
+int proto_valid_text(const char *s)
+{
+    size_t n = strnlen(s, PROTO_TEXT_MAX + 1);
+    return n >= 1 && n <= PROTO_TEXT_MAX;
+}
 static int valid_reason(const char *s) { return valid_str(s, 0, PROTO_REASON_MAX, NULL); }
 static int valid_code(int code)        { return code >= 100 && code <= 999; }
 
 /* Nick vindo de um SERVIDOR (CHAT.from/to, USERS): regra larga, só o que é
  * preciso para o mostrar e para o partir por espaços. Tolerante a receber:
  * um servidor de outro grupo que aceite aspas nos nicks não nos parte. */
-static int valid_peer_nick(const char *s) { return valid_str(s, 1, PROTO_NICK_MAX, " "); }
+static int valid_peer_nick(const char *s) { return valid_str(s, 1, PROTO_PEER_NICK_MAX, " "); }
 
 /* ---- Comparação de nicks (D18) ------------------------------------------ */
 
@@ -172,6 +178,49 @@ static int get_str(const cJSON *obj, const char *key, char *dst, size_t dst_cap,
     return 1;
 }
 
+/* Um pedido com text (MSG, PRIV): 0 se é válido; senão a razão do ERROR 400.
+ * "text too long" e não "invalid field" para o text grande de mais: é o único
+ * caso que um utilizador provoca sem querer, e merece uma mensagem própria
+ * (acordado com o primeiro grupo). */
+static const char *get_request_text(const cJSON *obj, char *dst, size_t dst_cap)
+{
+    const cJSON *it = cJSON_GetObjectItemCaseSensitive(obj, "text");
+    if (!cJSON_IsString(it) || it->valuestring == NULL)
+        return PROTO_R_FIELD;
+    size_t n = strlen(it->valuestring);
+    if (n == 0)
+        return PROTO_R_FIELD;               /* text vazio continua proibido */
+    if (n > PROTO_TEXT_MAX)
+        return PROTO_R_TEXT_LONG;
+    memcpy(dst, it->valuestring, n + 1);    /* n <= 4096 < dst_cap */
+    (void)dst_cap;
+    return NULL;
+}
+
+/* Um campo de texto livre vindo de um SERVIDOR (CHAT.text, EVENT.text,
+ * ERROR.reason): tolerante. Tem de ser string; qualquer tamanho, vazio
+ * incluído. Se não couber, é cortado sem partir um caracter UTF-8 a meio
+ * (recua enquanto o primeiro byte que fica de fora for de continuação,
+ * 10xxxxxx) e *truncated fica a 1. 0 = ok, -1 = não é string. */
+static int get_peer_text(const cJSON *obj, const char *key, char *dst, size_t dst_cap,
+                         int *truncated)
+{
+    const cJSON *it = cJSON_GetObjectItemCaseSensitive(obj, key);
+    if (!cJSON_IsString(it) || it->valuestring == NULL)
+        return -1;
+    const char *v = it->valuestring;
+    size_t n = strlen(v);
+    if (n > dst_cap - 1) {
+        n = dst_cap - 1;
+        while (n > 0 && ((unsigned char)v[n] & 0xC0) == 0x80)
+            n--;
+        *truncated = 1;
+    }
+    memcpy(dst, v, n);
+    dst[n] = '\0';
+    return 0;
+}
+
 static int is_json_space(char c)
 {
     return c == ' ' || c == '\t' || c == '\r' || c == '\n';
@@ -216,29 +265,32 @@ int proto_parse(const char *line, size_t len, struct msg *out, struct proto_err 
             goto out;
         break;
 
-    case MT_MSG:
-        if (!get_str(root, "text", out->text, sizeof out->text, proto_valid_text))
+    case MT_MSG: {
+        const char *why = get_request_text(root, out->text, sizeof out->text);
+        if (why != NULL) {
+            err->reason = why;
             goto out;
+        }
         break;
+    }
 
     case MT_OK:
         break;
 
     case MT_CHAT: {
-        /* from/to vêm de um servidor: regra larga (tolerante a receber). */
+        /* Vem de um servidor: regras largas (tolerante a receber). O text
+         * pode vir vazio ou maior do que o nosso limite — mostra-se, cortado
+         * se for preciso, em vez de se recusar a mensagem inteira. */
         if (!get_str(root, "from", out->from, sizeof out->from, valid_peer_nick) ||
-            !get_str(root, "text", out->text, sizeof out->text, proto_valid_text))
+            get_peer_text(root, "text", out->text, sizeof out->text, &out->truncated) != 0)
             goto out;
         /* "private" é opcional: ausente = false; presente tem de ser bool. */
         const cJSON *pv = cJSON_GetObjectItemCaseSensitive(root, "private");
         if (pv != NULL && !cJSON_IsBool(pv))
             goto out;
         out->is_private = cJSON_IsTrue(pv);
-        /* "to" é opcional (D14, extensão nossa): ausente = "". Presente tem de
-         * ser um nick, pela mesma lógica do "private". */
-        if (cJSON_GetObjectItemCaseSensitive(root, "to") != NULL &&
-            !get_str(root, "to", out->to, sizeof out->to, valid_peer_nick))
-            goto out;
+        /* Desde a revisão do M3 não há "to" no CHAT: se um servidor o mandar,
+         * é um campo desconhecido e é ignorado, como qualquer outro. */
         break;
     }
 
@@ -250,18 +302,19 @@ int proto_parse(const char *line, size_t len, struct msg *out, struct proto_err 
             !valid_code(c->valueint))
             goto out;
         out->code = c->valueint;
-        /* "reason" é opcional: ausente = "". */
+        /* "reason" é opcional: ausente = "". Texto livre de um servidor:
+         * tolerante, como o text de um CHAT. */
         if (cJSON_GetObjectItemCaseSensitive(root, "reason") != NULL &&
-            !get_str(root, "reason", out->reason, sizeof out->reason, valid_reason))
+            get_peer_text(root, "reason", out->reason, sizeof out->reason,
+                          &out->truncated) != 0)
             goto out;
         break;
     }
 
     case MT_EVENT:
         /* Só "text". O slide 124 dá {"type":"EVENT","text":"rui joined"}:
-         * o texto é livre, por isso vale a mesma regra do text de um CHAT
-         * (sem caracteres de controlo, logo sem '\n' a partir a linha). */
-        if (!get_str(root, "text", out->text, sizeof out->text, proto_valid_text))
+         * texto livre de um servidor, tolerante como o de um CHAT. */
+        if (get_peer_text(root, "text", out->text, sizeof out->text, &out->truncated) != 0)
             goto out;
         break;
 
@@ -269,9 +322,15 @@ int proto_parse(const char *line, size_t len, struct msg *out, struct proto_err 
         /* {"type":"PRIV","to":"rui","text":"hi"} — slide 124. O "to" é um
          * nick ESTRITO: é um pedido de um cliente, e o destino tem de poder
          * existir no nosso servidor. */
-        if (!get_str(root, "to", out->to, sizeof out->to, proto_valid_nick) ||
-            !get_str(root, "text", out->text, sizeof out->text, proto_valid_text))
+        if (!get_str(root, "to", out->to, sizeof out->to, proto_valid_nick))
             goto out;
+        {
+            const char *why = get_request_text(root, out->text, sizeof out->text);
+            if (why != NULL) {
+                err->reason = why;
+                goto out;
+            }
+        }
         break;
 
     case MT_LIST:                           /* sem campos */
@@ -281,8 +340,9 @@ int proto_parse(const char *line, size_t len, struct msg *out, struct proto_err 
     case MT_USERS: {
         /* {"type":"USERS","nicks":["ana","rui"]} — o primeiro array do
          * protocolo. Cada elemento tem de ser string e nick (regra larga: vem
-         * de um servidor). Lista vazia é aceite. Não há limite de contagem
-         * aqui: o que coube numa linha cabe no buffer (protocol.h). */
+         * de um servidor). Lista vazia é aceite. Não há limite de contagem:
+         * guarda-se o que couber em PROTO_NICKS_BUF e marca-se `truncated`
+         * (um servidor federado pode ter centenas de pessoas). */
         const cJSON *arr = cJSON_GetObjectItemCaseSensitive(root, "nicks");
         if (!cJSON_IsArray(arr))
             goto out;
@@ -293,8 +353,10 @@ int proto_parse(const char *line, size_t len, struct msg *out, struct proto_err 
                 !valid_peer_nick(it->valuestring))
                 goto out;
             size_t n = strlen(it->valuestring);
-            if (used + (used ? 1 : 0) + n + 1 > sizeof out->nicks)
-                goto out;                   /* inalcançável: ver PROTO_NICKS_BUF */
+            if (used + (used ? 1 : 0) + n + 1 > sizeof out->nicks) {
+                out->truncated = 1;         /* não cabe: os seguintes ficam de fora */
+                continue;                   /* mas valida-os na mesma */
+            }
             if (used)
                 out->nicks[used++] = ' ';
             memcpy(out->nicks + used, it->valuestring, n + 1);
@@ -327,8 +389,7 @@ static int valid_msg(const struct msg *m)
     case MT_NICK:  return proto_valid_nick(m->nick);
     case MT_MSG:   return proto_valid_text(m->text);
     case MT_OK:    return 1;
-    case MT_CHAT:  return proto_valid_nick(m->from) && proto_valid_text(m->text) &&
-                          (m->to[0] == '\0' || proto_valid_nick(m->to));
+    case MT_CHAT:  return proto_valid_nick(m->from) && proto_valid_text(m->text);
     case MT_ERROR: return valid_code(m->code) && valid_reason(m->reason);
     case MT_EVENT: return proto_valid_text(m->text);
     case MT_PRIV:  return proto_valid_nick(m->to) && proto_valid_text(m->text);
@@ -367,10 +428,9 @@ int proto_encode(const struct msg *m, char *out, size_t cap, size_t *out_len)
     case MT_OK:
         break;
     case MT_CHAT:
-        /* "to" só se estiver preenchido (CHAT privado, D14): um CHAT público
-         * continua a ter exatamente os bytes do slide (teste #31). */
+        /* Exatamente os campos do slide. O m->to de um CHAT privado serve só
+         * para o encaminhar (SESS_TO) e NÃO vai para o fio (revisão do M3). */
         if (!cJSON_AddStringToObject(root, "from", m->from) ||
-            (m->to[0] != '\0' && !cJSON_AddStringToObject(root, "to", m->to)) ||
             !cJSON_AddStringToObject(root, "text", m->text) ||
             !cJSON_AddBoolToObject(root, "private", m->is_private != 0))
             goto out;

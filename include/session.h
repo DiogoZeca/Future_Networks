@@ -36,8 +36,8 @@
  * -------------------------
  *   D5  o emissor de MSG recebe o seu próprio CHAT -> SESS_ALL, não
  *       SESS_OTHERS. É por isso que o cliente NÃO deve ecoar localmente o que
- *       escreve: o eco vem do servidor, e serve de confirmação de que a
- *       mensagem lá chegou mesmo.
+ *       escreve para todos: o eco vem do servidor. (O PRIV é diferente desde
+ *       a revisão do M3: ver D14.)
  *   D6  NICK aceite -> OK.
  *   -   pedido de cliente antes do NICK -> ERROR 401 "nick required".
  *   -   NICK depois de registado -> ERROR 400 "nick already set" (mudar de
@@ -66,12 +66,18 @@
  * é um array (test_session.c). As DECISÕES continuam todas aqui — o diretório
  * só responde a perguntas ("está livre?", "existe?", "quem está?").
  *
- * DECISÕES DO M3 (PROTOCOL.md §4, todas PROPOSTA):
- *   D13 cada pedido tem UMA resposta direta: NICK → OK, MSG → o próprio
- *       CHAT, PRIV → a cópia do CHAT, LIST → USERS, QUIT → OK (ou um ERROR).
- *   D14 PRIV: o destino recebe CHAT com private:true; o emissor recebe uma
- *       CÓPIA (como no D5, não há eco local). O CHAT leva "to" com o nick
- *       do destino. A si próprio: entregue uma vez só.
+ * DECISÕES DO M3 (PROTOCOL.md §4). D13 e D14 foram REVISTAS com o primeiro
+ * grupo com quem falámos (M3.md, "Revisão do M3"):
+ *   D13 "OK = last request accepted" (slide 124), à letra: NICK, MSG, PRIV e
+ *       QUIT aceites recebem OK, e o OK sai SEMPRE antes do CHAT. O LIST é
+ *       respondido pelo USERS (slide: "Reply to LIST"). Um pedido recusado
+ *       recebe só o ERROR.
+ *       (Antes da revisão: MSG e PRIV eram confirmados pelo CHAT, sem OK.)
+ *   D14 PRIV: só o destino recebe o CHAT (private:true). O emissor recebe o
+ *       OK e NÃO recebe cópia: um CHAT é "uma mensagem que te chegou", e uma
+ *       cópia mudava esse significado. Quem quiser ver o que enviou mostra-o
+ *       localmente (o nosso cliente faz isso). A si próprio: OK + o CHAT.
+ *       (Antes da revisão: cópia ao emissor, com um campo "to" no CHAT.)
  *   D15 PRIV para um nick que não está no chat → ERROR 404 "no such nick".
  *   D16 USERS: quem está no chat, INCLUINDO o próprio, por ordem alfabética
  *       (proto_nick_cmp). Quem ainda não fez NICK não aparece.
@@ -140,8 +146,9 @@ struct sess_out {
     struct msg     msg;
 };
 
-/* Máximo de saídas que uma linha pode produzir. São 2: o NICK aceite dá OK +
- * EVENT, e o PRIV dá o CHAT ao destino + a cópia ao emissor. */
+/* Máximo de saídas que uma linha pode produzir. São 2, e o OK é sempre a
+ * primeira: NICK -> OK + EVENT; MSG -> OK + CHAT a todos; PRIV -> OK + CHAT
+ * ao destino. */
 #define SESS_MAX_OUT 2
 
 /* Começa em AWAITING_NICK, com o diretório desta ligação. */
