@@ -12,6 +12,8 @@
  *          ThreadSanitizer numa compilação à parte: o ASan NÃO vê data races.
  *   14     Quem ainda não fez NICK está ligado mas fora do chat. Nasceu de um
  *          bug que o scripts/probe_m2.py apanhou, não de uma ideia à partida.
+ *   15-18  Nicks (M3): reserva única, procura por nick, lista de nicks, e a
+ *          corrida de dois NICK iguais ao mesmo tempo (18, com threads).
  *
  * Os clientes de teste usam fd = -1 (o contrato permite), exceto o caso 9 que
  * precisa de um fd real para verificar que o close() acontece.
@@ -401,6 +403,165 @@ static void caso_14_so_entra_no_chat_depois_do_nick(void)
     roster_destroy(&R);
 }
 
+
+/* ---- Nicks (M3) --------------------------------------------------------- */
+
+/* 15. roster_claim: nicks unicos, sem olhar a maiusculas (D18). */
+static void caso_15_claim(void)
+{
+    roster_init(&R);
+    struct client *a = roster_add(&R, -1, "a");
+    struct client *b = roster_add(&R, -1, "b");
+    NEED(a); NEED(b);
+
+    CASE(15, "o primeiro a pedir \"ana\" fica com ela");
+    CHECK_INT(roster_claim(&R, a, "ana"), 1);
+    CHECK_STR(a->nick, "ana");
+
+    CASE(15, "o segundo nao: 409, mesmo ANTES do join (reservado conta)");
+    CHECK_INT(a->joined, 0);
+    CHECK_INT(roster_claim(&R, b, "ana"), 0);
+    CHECK_STR(b->nick, "");
+
+    CASE(15, "nem com outras maiusculas (D18)");
+    CHECK_INT(roster_claim(&R, b, "ANA"), 0);
+    CHECK_INT(roster_claim(&R, b, "Ana"), 0);
+
+    CASE(15, "outro nick passa; o proprio pode voltar a pedir o seu");
+    CHECK_INT(roster_claim(&R, b, "rui"), 1);
+    CHECK_INT(roster_claim(&R, a, "ana"), 1);
+
+    CASE(15, "quando a dona sai da lista, \"ana\" fica livre");
+    roster_remove(&R, a);
+    struct client *c = roster_add(&R, -1, "c");
+    NEED(c);
+    CHECK_INT(roster_claim(&R, c, "ana"), 1);
+
+    client_release(&R, a);
+    roster_remove(&R, b); client_release(&R, b);
+    roster_remove(&R, c); client_release(&R, c);
+    roster_destroy(&R);
+}
+
+/* 16. roster_lookup / roster_find: so quem esta no chat; find segura o cliente. */
+static void caso_16_find(void)
+{
+    char canon[PROTO_NICK_MAX + 1];
+
+    roster_init(&R);
+    struct client *a = roster_add(&R, -1, "a");
+    NEED(a);
+    roster_claim(&R, a, "Ana");
+
+    CASE(16, "reservado mas ainda nao no chat: nao e encontrado (PRIV -> 404)");
+    CHECK_INT(roster_lookup(&R, "Ana", canon), 0);
+    CHECK(roster_find(&R, "Ana") == NULL);
+
+    CASE(16, "depois do join e encontrado, sem olhar a maiusculas, com o nick registado");
+    roster_join(&R, a, "Ana");
+    CHECK_INT(roster_lookup(&R, "ana", canon), 1);
+    CHECK_STR(canon, "Ana");
+    CHECK_INT(roster_lookup(&R, "rui", NULL), 0);
+
+    CASE(16, "find da +1 referencia: o cliente sobrevive a saida ate ao release");
+    struct client *f = roster_find(&R, "ANA");
+    CHECK(f == a);
+    roster_remove(&R, a);
+    client_release(&R, a);                    /* a da thread dona */
+    if (f != NULL) {
+        CHECK_STR(f->nick, "Ana");            /* ainda valido: o ASan diria se nao */
+        client_release(&R, f);                /* agora sim, liberta */
+    }
+
+    CASE(16, "depois de sair ja nao e encontrado");
+    CHECK_INT(roster_lookup(&R, "ana", NULL), 0);
+    roster_destroy(&R);
+}
+
+/* 17. roster_nicks: os nicks de quem esta no chat. */
+static void caso_17_nicks(void)
+{
+    char out[ROSTER_MAX][PROTO_NICK_MAX + 1];
+
+    roster_init(&R);
+    CASE(17, "vazio");
+    CHECK_INT(roster_nicks(&R, out, ROSTER_MAX), 0);
+
+    struct client *a = add_joined("a", "ana");
+    struct client *b = add_joined("b", "rui");
+    struct client *m = roster_add(&R, -1, "mudo");
+    NEED(a); NEED(b); NEED(m);
+    roster_claim(&R, m, "zed");               /* reservado, nao entrou */
+
+    CASE(17, "so os que estao no chat");
+    size_t n = roster_nicks(&R, out, ROSTER_MAX);
+    CHECK_INT(n, 2);
+    int viu_ana = 0, viu_rui = 0;
+    for (size_t i = 0; i < n; i++) {
+        viu_ana |= strcmp(out[i], "ana") == 0;
+        viu_rui |= strcmp(out[i], "rui") == 0;
+    }
+    CHECK(viu_ana && viu_rui);
+
+    CASE(17, "respeita cap");
+    CHECK_INT(roster_nicks(&R, out, 1), 1);
+
+    roster_remove(&R, a); client_release(&R, a);
+    roster_remove(&R, b); client_release(&R, b);
+    roster_remove(&R, m); client_release(&R, m);
+    roster_destroy(&R);
+}
+
+/* 18. A CORRIDA DOS NICKS UNICOS.
+ *     16 threads, cada uma com o seu cliente, pedem "ana" no mesmo instante
+ *     (barreira). Exatamente UMA pode ganhar. Repetido 200 vezes. Se a
+ *     verificacao e a reserva estivessem em locks separados, varias rondas
+ *     acabavam com duas "ana" — a mutacao "lookup + claim" faz isto falhar. */
+#define NCLAIM 16
+static pthread_barrier_t  barreira;
+static struct client     *claimers[NCLAIM];
+static int                ganhou[NCLAIM];
+
+static void *worker_claim(void *arg)
+{
+    int i = (int)(long)arg;
+    pthread_barrier_wait(&barreira);
+    ganhou[i] = roster_claim(&R, claimers[i], "ana");
+    return NULL;
+}
+
+static void caso_18_claim_em_paralelo(void)
+{
+    CASE(18, "16 threads pedem \"ana\" ao mesmo tempo, 200x: ganha sempre UMA");
+    int rondas_mas = 0;
+
+    for (int ronda = 0; ronda < NLOOPS; ronda++) {
+        pthread_t th[NCLAIM];
+        roster_init(&R);
+        pthread_barrier_init(&barreira, NULL, NCLAIM);
+        for (int i = 0; i < NCLAIM; i++) {
+            claimers[i] = roster_add(&R, -1, "t");
+            ganhou[i] = 0;
+        }
+        for (int i = 0; i < NCLAIM; i++)
+            pthread_create(&th[i], NULL, worker_claim, (void *)(long)i);
+        int vencedores = 0;
+        for (int i = 0; i < NCLAIM; i++) {
+            pthread_join(th[i], NULL);
+            vencedores += ganhou[i];
+        }
+        if (vencedores != 1)
+            rondas_mas++;
+        pthread_barrier_destroy(&barreira);
+        for (int i = 0; i < NCLAIM; i++) {
+            roster_remove(&R, claimers[i]);
+            client_release(&R, claimers[i]);
+        }
+        roster_destroy(&R);
+    }
+    CHECK_INT(rondas_mas, 0);
+}
+
 /* ------------------------------------------------------------------------ */
 
 int main(void)
@@ -419,5 +580,9 @@ int main(void)
     caso_11_entra_sai_em_paralelo();
     caso_12_retrato_vs_saida();
     caso_13_estaveis_e_retratos();
+    caso_15_claim();
+    caso_16_find();
+    caso_17_nicks();
+    caso_18_claim_em_paralelo();
     return t_report("roster");
 }

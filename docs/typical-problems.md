@@ -1,11 +1,12 @@
 # Problemas típicos
 
-Catálogo dos erros que aparecem sempre neste tipo de projeto (com base nos do professor — slide 125 — mais alguns encontrados a testar o M0, o M1 e o M2).
+Catálogo dos erros que aparecem sempre neste tipo de projeto (com base nos do professor — slide 125 — mais alguns encontrados a testar o M0, o M1, o M2 e o M3).
 
 Cada entrada tem um **Estado**. Os resolvidos estão explicados em detalhe
 (evidência → solução → prova) em
 [`milestones/M1.md` — "Problemas do M0 resolvidos no M1"](milestones/M1.md#problemas-do-m0-resolvidos-no-m1) e
-[`milestones/M2.md` — "Problemas do M1 resolvidos no M2"](milestones/M2.md#problemas-do-m1-resolvidos-no-m2).
+[`milestones/M2.md` — "Problemas do M1 resolvidos no M2"](milestones/M2.md#problemas-do-m1-resolvidos-no-m2) e
+[`milestones/M3.md` — "Problemas resolvidos no M3"](milestones/M3.md#problemas-resolvidos-no-m3).
 
 ---
 
@@ -48,6 +49,18 @@ Observada em 2026-10-13 (detalhe em `milestones/M2.md`, P12 e P18):
 | 2000 entradas com um cliente a falar sem parar | **26** viram um `CHAT` antes do `OK` ao seu `NICK` | 0 |
 | O mesmo com ThreadSanitizer (300 entradas) | **61** | 0 |
 | `probe_m2.py` inteiro com ThreadSanitizer | — | zero data races |
+
+## 0.3 Evidência medida no M3
+
+Observada em 2026-10-14 (detalhe em `milestones/M3.md`, P20–P22):
+
+| Experiência | Com o bug (mutação) | Versão final |
+|---|---|---|
+| 16 threads pedem o mesmo nick no mesmo instante, 200 rondas | verificar e reservar em 2 locks: **36** rondas acabam com mais do que uma "ana" | 0 |
+| 50 rondas de 8 clientes reais com o mesmo `NICK` | — | sempre 1 `OK` e 7 × `409` |
+| 1500 `PRIV` para um cliente que entra e sai sem parar | `find` sem refcount: ASan **heap-use-after-free**, o servidor cai | só cópias ou 404; servidor vivo |
+| `USERS` com 64 nicks de 32 bytes | com `"` nos nicks seriam 4315 bytes (> 4096) | 2266 bytes + `\n` |
+| `probe_m2.py` + `probe_m3.py` com ThreadSanitizer | — | zero avisos |
 
 ---
 
@@ -160,6 +173,13 @@ desligar?"*. São quatro cenários distintos, com sintomas diferentes.
 - **Como evitar:** quando a ordem importa, só tornar o cliente visível aos outros **depois** de lhe ter enviado a resposta. E, do lado do cliente, não assumir que a primeira linha é a resposta: esperar pelo tipo certo.
 - **Estado:** `Resolvido` - **M2** (revisão, D9): `roster_join()` depois do `OK`; o cliente espera por `OK`/`ERROR`. Prova: `probe_m2.py` §6 (1000 entradas, 0 falhas; antes 26/2000). O ThreadSanitizer **não** o apanha: não é uma data race.
 
+### 3.6 Verificar e depois agir (*check-then-act*): nicks duplicados
+
+- **Sintoma:** dois clientes com o mesmo nick, mas só quando entram **ao mesmo tempo** (raro à mão, frequente com scripts ou no dia da interop com vários grupos a ligar).
+- **Porquê:** "o nick está livre?" e "guardar o nick" são duas operações. Cada uma com o lock está correta; entre as duas, outra thread faz a mesma pergunta e recebe a mesma resposta. Proteger cada acesso não protege uma decisão que depende de dois.
+- **Como evitar:** a decisão e a escrita no **mesmo** lock (uma só função). E contar como "em uso" quem já reservou mas ainda não entrou no chat.
+- **Estado:** `Resolvido` - **M3**: `roster_claim()`. Prova: `test_roster` #18 (16 threads × 200 rondas; a mutação com dois locks falha 36/200), `probe_m3.py` §1.
+
 ---
 
 ## 4. Rede e ambiente
@@ -241,7 +261,7 @@ Relevante porque os outros grupos não usam todos Linux.
 |---|---|---|
 | Fugas do cJSON | Cada `cJSON_Parse()` precisa de `cJSON_Delete()`; cada `cJSON_PrintUnformatted()` devolve memória que é preciso libertar | `Resolvido` - **M1**: uma única saída por função; mutações apanhadas pelo LeakSanitizer (M1.md, P9) |
 | Fuga de descritores | Falhar um `close(fd)` num caminho de erro esgota o limite de fds; o servidor deixa de aceitar ligações ao fim de ~1024 | `Parcial Resolvido` - rever cada `goto`/`break` |
-| Buffer na stack por thread | Com N clientes, N × buffer. Escolher tamanhos conscientemente | `Resolvido` - **M2**: ~23 KB por thread do servidor (`rxbuf` 8 KB + `chunk` 4 KB + `line` 4 KB + saídas 2,5 KB + linha codificada 4 KB + retrato 0,5 KB), dentro de uma stack de 8 MB; com o máximo de 64 clientes, ~1,5 MB. Sem `malloc` por mensagem |
+| Buffer na stack por thread | Com N clientes, N × buffer. Escolher tamanhos conscientemente | `Resolvido` - **M2**: ~23 KB por thread do servidor (`rxbuf` 8 KB + `chunk` 4 KB + `line` 4 KB + saídas 2,5 KB + linha codificada 4 KB + retrato 0,5 KB), dentro de uma stack de 8 MB; com o máximo de 64 clientes, ~1,5 MB. Sem `malloc` por mensagem. **M3**: a `struct msg` passou de ~1,2 KB a ~5,3 KB (buffer dos nicks do `USERS`); ~55 KB por thread no pior caso, ~3,5 MB com 64 clientes |
 | Strings sem terminador | `recv()` **não** põe `\0`. Nunca passar o buffer a `printf("%s")` sem limitar o tamanho | `Resolvido` - **M1**: comprimento sempre explícito (`out_len`), linhas com `'\0'` recusadas, `%.*s` nos logs (M1.md, P6) |
 
 **Ferramenta:** `make SAN=1` (ASan + UBSan) já está no Makefile. Usar **sempre** que se testa concorrência, não só quando algo rebenta.
@@ -252,14 +272,18 @@ Relevante porque os outros grupos não usam todos Linux.
 
 | Problema | Como evitar |
 |---|---|
-| Cada grupo resolve a semântica ambígua de forma diferente | Fechar as secções *TO AGREE* do `PROTOCOL.md` **com os outros grupos**, por escrito, antes do M3 |
+| Cada grupo resolve a semântica ambígua de forma diferente | Fechar as propostas do `PROTOCOL.md` **com os outros grupos**, por escrito. A lista completa, com prioridades e o que parte se divergirem, está em [`DECISIONS.md`](DECISIONS.md) |
 | Porta diferente por grupo | Acordar a porta por omissão (proposta: 5000) |
 | O emissor de `MSG` recebe o próprio `CHAT`? | Se um grupo decide que sim e outro que não, as mensagens aparecem duplicadas ou em falta - e parece um bug de rede. **Proposta nossa (D5): sim** - `PROTOCOL.md` v0.2, por acordar |
 | `OK` a todos os pedidos ou só a alguns? | Um cliente que espere `OK` bloqueia contra um servidor que não o envia. **Proposta nossa (D6): `OK` ao `NICK`**; o nosso cliente tem timeout de 5 s para não bloquear contra quem decidir diferente |
 | Campos desconhecidos | A spec já diz: **ignorar**. Isto permite extensões sem partir ninguém |
 | A 1.ª linha depois do `NICK` é a resposta? | No nosso servidor **sim**, garantido (3.5). Mas o nosso cliente não o assume: espera por `OK`/`ERROR` e mostra o que vier antes, para aguentar servidores que mandem boas-vindas ou um `EVENT` primeiro |
 | Servidor cheio | **Proposta nossa (D12):** `ERROR 503 "server full"` e fecho, em vez de um fecho sem explicação |
-| Nicks com maiúsculas/acentos/espaços | **Proposta nossa (D4):** 1–32 bytes, sem espaços nem caracteres de controlo, UTF-8 aceite sem validar; case-sensitive ainda por decidir (importa no M3, nicks únicos) |
+| Nicks com maiúsculas/acentos/espaços | **Proposta nossa (D4, D18, D20):** 1–32 bytes, sem espaços, `"`, `\` nem caracteres de controlo, UTF-8 aceite sem validar; **sem olhar a maiúsculas** (só ASCII) para a unicidade e para o destino do `PRIV` |
+| O emissor de `PRIV` recebe cópia? | **Proposta nossa (D14): sim**, como no `MSG` — sem eco local. A cópia leva `"to"` (extensão; quem não a conhece ignora-a) |
+| `QUIT` tem `OK`? | **Proposta nossa (D17): sim**, e o servidor fecha; também antes do `NICK`. O nosso cliente aguenta um servidor que feche sem `OK` |
+| `USERS` inclui quem pede? Que ordem? | **Proposta nossa (D16):** sim, alfabética. O `interop.py` compara a lista exata no cenário 10: contra outro grupo pode falhar só pela ordem |
+| Um cenário de interop falha só porque o outro grupo manda `EVENT` a mais | O `interop.py` salta os `EVENT` quando espera outra coisa (M3) |
 | Testar só contra nós próprios | Os cenários em `tests/interop/` são texto puro e correm contra qualquer servidor com `scripts/interop.py` (3 modos de envio). `scripts/probe_client.py` mostra como o nosso cliente reage a servidores que decidiram diferente |
 
 **Regra prática:** ser **estrito a enviar, tolerante a receber**. Nunca rebentar por causa do que o peer mandou - responder `ERROR` e continuar.
@@ -276,5 +300,6 @@ Relevante porque os outros grupos não usam todos Linux.
 - [ ] Enviar lixo (`echo "nao e json" | nc host porta`) → `ERROR`, não crash
 - [ ] Enviar uma linha de 1 MB sem `\n` → `ERROR`, não overflow
 - [ ] Testar entre **duas máquinas**, não só em loopback
-- [ ] Testar contra o servidor de outro grupo
+- [ ] Testar contra o servidor de outro grupo (e preencher o registo no `DECISIONS.md`)
+- [ ] Dois clientes com o mesmo nick ao mesmo tempo → um `OK`, um `409` (M3+; `probe_m3.py` §1)
 - [ ] Notas do milestone preenchidas em `docs/milestones/`

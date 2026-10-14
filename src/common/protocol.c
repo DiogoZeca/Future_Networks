@@ -20,24 +20,105 @@ static int is_control(unsigned char c)
     return c < 0x20 || c == 0x7F;
 }
 
-/* min..max bytes, sem caracteres de controlo e, se no_space, sem ' '. */
-static int valid_str(const char *s, size_t min, size_t max, int no_space)
+/* min..max bytes, sem caracteres de controlo nem nenhum dos bytes de `banned`
+ * (NULL = nenhum). */
+static int valid_str(const char *s, size_t min, size_t max, const char *banned)
 {
     size_t n = strnlen(s, max + 1);         /* nunca lê mais do que max+1 */
     if (n < min || n > max)
         return 0;
     for (size_t i = 0; i < n; i++) {
         unsigned char c = (unsigned char)s[i];
-        if (is_control(c) || (no_space && c == ' '))
+        if (is_control(c) || (banned != NULL && strchr(banned, c) != NULL))
             return 0;
     }
     return 1;
 }
 
-int proto_valid_nick(const char *s)    { return valid_str(s, 1, PROTO_NICK_MAX, 1); }
-int proto_valid_text(const char *s)    { return valid_str(s, 1, PROTO_TEXT_MAX, 0); }
-static int valid_reason(const char *s) { return valid_str(s, 0, PROTO_REASON_MAX, 0); }
+/* Nick estrito (D4 + D20): o que aceitamos num NICK/PRIV e o que enviamos.
+ * Sem ' ' (o /msg e o USERS partem por espaço) e sem '"' nem '\\' (o JSON
+ * escapava-os para 2 bytes e o pior USERS deixava de caber numa linha). */
+int proto_valid_nick(const char *s)    { return valid_str(s, 1, PROTO_NICK_MAX, " \"\\"); }
+int proto_valid_text(const char *s)    { return valid_str(s, 1, PROTO_TEXT_MAX, NULL); }
+static int valid_reason(const char *s) { return valid_str(s, 0, PROTO_REASON_MAX, NULL); }
 static int valid_code(int code)        { return code >= 100 && code <= 999; }
+
+/* Nick vindo de um SERVIDOR (CHAT.from/to, USERS): regra larga, só o que é
+ * preciso para o mostrar e para o partir por espaços. Tolerante a receber:
+ * um servidor de outro grupo que aceite aspas nos nicks não nos parte. */
+static int valid_peer_nick(const char *s) { return valid_str(s, 1, PROTO_NICK_MAX, " "); }
+
+/* ---- Comparação de nicks (D18) ------------------------------------------ */
+
+/* tolower() só para ASCII. Não se usa o tolower() da libc: depende do locale
+ * e, com um locale latino, podia dobrar bytes >= 0x80 de forma diferente
+ * consoante a máquina — e dois servidores discordavam do que é "o mesmo". */
+static unsigned char fold(unsigned char c)
+{
+    return (c >= 'A' && c <= 'Z') ? (unsigned char)(c - 'A' + 'a') : c;
+}
+
+int proto_nick_cmp(const char *a, const char *b)
+{
+    const unsigned char *x = (const unsigned char *)a;
+    const unsigned char *y = (const unsigned char *)b;
+    size_t i = 0;
+    for (; x[i] != '\0' && fold(x[i]) == fold(y[i]); i++)
+        ;
+    if (fold(x[i]) != fold(y[i]))
+        return fold(x[i]) < fold(y[i]) ? -1 : 1;
+    return strcmp(a, b);                    /* empate: "Ana" antes de "ana" */
+}
+
+int proto_nick_eq(const char *a, const char *b)
+{
+    for (; *a != '\0' && fold((unsigned char)*a) == fold((unsigned char)*b); a++, b++)
+        ;
+    return *a == '\0' && *b == '\0';
+}
+
+/* ---- USERS: nicks numa só string ---------------------------------------- */
+
+int proto_users_add(struct msg *m, const char *nick)
+{
+    if (m->type != MT_USERS || !proto_valid_nick(nick) || m->n_nicks >= PROTO_USERS_MAX)
+        return -1;
+    size_t used = strlen(m->nicks);
+    size_t need = (used ? 1 : 0) + strlen(nick) + 1;   /* espaço + nick + '\0' */
+    if (used + need > sizeof m->nicks)                 /* nunca com <= 64 nicks */
+        return -1;
+    if (used)
+        m->nicks[used++] = ' ';
+    strcpy(m->nicks + used, nick);
+    m->n_nicks++;
+    return 0;
+}
+
+/* Valida a string empacotada de um USERS a ENVIAR: n_nicks nicks estritos,
+ * separados por UM espaço, sem espaços nas pontas, no máximo PROTO_USERS_MAX.
+ * Lista vazia ("" e 0) é válida. */
+static int valid_users(const struct msg *m)
+{
+    if (m->n_nicks > PROTO_USERS_MAX || memchr(m->nicks, '\0', sizeof m->nicks) == NULL)
+        return 0;
+    size_t count = 0;
+    const char *p = m->nicks;
+    while (*p != '\0') {
+        size_t n = strcspn(p, " ");
+        char one[PROTO_NICK_MAX + 1];
+        if (n == 0 || n > PROTO_NICK_MAX)   /* dois espaços seguidos, ou à cabeça */
+            return 0;
+        memcpy(one, p, n);
+        one[n] = '\0';
+        if (!proto_valid_nick(one))
+            return 0;
+        count++;
+        p += n;
+        if (*p == ' ' && *++p == '\0')     /* espaço no fim */
+            return 0;
+    }
+    return count == m->n_nicks;
+}
 
 /* ---- Tabela de tipos ---------------------------------------------------- */
 
@@ -48,6 +129,10 @@ static const struct { enum msg_type t; const char *name; } TYPES[] = {
     { MT_CHAT,  "CHAT"  },
     { MT_ERROR, "ERROR" },
     { MT_EVENT, "EVENT" },
+    { MT_PRIV,  "PRIV"  },
+    { MT_LIST,  "LIST"  },
+    { MT_QUIT,  "QUIT"  },
+    { MT_USERS, "USERS" },
 };
 #define N_TYPES (sizeof TYPES / sizeof TYPES[0])
 
@@ -140,7 +225,8 @@ int proto_parse(const char *line, size_t len, struct msg *out, struct proto_err 
         break;
 
     case MT_CHAT: {
-        if (!get_str(root, "from", out->from, sizeof out->from, proto_valid_nick) ||
+        /* from/to vêm de um servidor: regra larga (tolerante a receber). */
+        if (!get_str(root, "from", out->from, sizeof out->from, valid_peer_nick) ||
             !get_str(root, "text", out->text, sizeof out->text, proto_valid_text))
             goto out;
         /* "private" é opcional: ausente = false; presente tem de ser bool. */
@@ -148,6 +234,11 @@ int proto_parse(const char *line, size_t len, struct msg *out, struct proto_err 
         if (pv != NULL && !cJSON_IsBool(pv))
             goto out;
         out->is_private = cJSON_IsTrue(pv);
+        /* "to" é opcional (D14, extensão nossa): ausente = "". Presente tem de
+         * ser um nick, pela mesma lógica do "private". */
+        if (cJSON_GetObjectItemCaseSensitive(root, "to") != NULL &&
+            !get_str(root, "to", out->to, sizeof out->to, valid_peer_nick))
+            goto out;
         break;
     }
 
@@ -174,6 +265,45 @@ int proto_parse(const char *line, size_t len, struct msg *out, struct proto_err 
             goto out;
         break;
 
+    case MT_PRIV:
+        /* {"type":"PRIV","to":"rui","text":"hi"} — slide 124. O "to" é um
+         * nick ESTRITO: é um pedido de um cliente, e o destino tem de poder
+         * existir no nosso servidor. */
+        if (!get_str(root, "to", out->to, sizeof out->to, proto_valid_nick) ||
+            !get_str(root, "text", out->text, sizeof out->text, proto_valid_text))
+            goto out;
+        break;
+
+    case MT_LIST:                           /* sem campos */
+    case MT_QUIT:
+        break;
+
+    case MT_USERS: {
+        /* {"type":"USERS","nicks":["ana","rui"]} — o primeiro array do
+         * protocolo. Cada elemento tem de ser string e nick (regra larga: vem
+         * de um servidor). Lista vazia é aceite. Não há limite de contagem
+         * aqui: o que coube numa linha cabe no buffer (protocol.h). */
+        const cJSON *arr = cJSON_GetObjectItemCaseSensitive(root, "nicks");
+        if (!cJSON_IsArray(arr))
+            goto out;
+        size_t used = 0;
+        const cJSON *it;
+        cJSON_ArrayForEach(it, arr) {
+            if (!cJSON_IsString(it) || it->valuestring == NULL ||
+                !valid_peer_nick(it->valuestring))
+                goto out;
+            size_t n = strlen(it->valuestring);
+            if (used + (used ? 1 : 0) + n + 1 > sizeof out->nicks)
+                goto out;                   /* inalcançável: ver PROTO_NICKS_BUF */
+            if (used)
+                out->nicks[used++] = ' ';
+            memcpy(out->nicks + used, it->valuestring, n + 1);
+            used += n;
+            out->n_nicks++;
+        }
+        break;
+    }
+
     default:                                /* string válida, tipo desconhecido */
         err->reason = PROTO_R_TYPE;
         goto out;
@@ -197,9 +327,14 @@ static int valid_msg(const struct msg *m)
     case MT_NICK:  return proto_valid_nick(m->nick);
     case MT_MSG:   return proto_valid_text(m->text);
     case MT_OK:    return 1;
-    case MT_CHAT:  return proto_valid_nick(m->from) && proto_valid_text(m->text);
+    case MT_CHAT:  return proto_valid_nick(m->from) && proto_valid_text(m->text) &&
+                          (m->to[0] == '\0' || proto_valid_nick(m->to));
     case MT_ERROR: return valid_code(m->code) && valid_reason(m->reason);
     case MT_EVENT: return proto_valid_text(m->text);
+    case MT_PRIV:  return proto_valid_nick(m->to) && proto_valid_text(m->text);
+    case MT_LIST:
+    case MT_QUIT:  return 1;
+    case MT_USERS: return valid_users(m);
     default:       return 0;
     }
 }
@@ -232,7 +367,10 @@ int proto_encode(const struct msg *m, char *out, size_t cap, size_t *out_len)
     case MT_OK:
         break;
     case MT_CHAT:
+        /* "to" só se estiver preenchido (CHAT privado, D14): um CHAT público
+         * continua a ter exatamente os bytes do slide (teste #31). */
         if (!cJSON_AddStringToObject(root, "from", m->from) ||
+            (m->to[0] != '\0' && !cJSON_AddStringToObject(root, "to", m->to)) ||
             !cJSON_AddStringToObject(root, "text", m->text) ||
             !cJSON_AddBoolToObject(root, "private", m->is_private != 0))
             goto out;
@@ -245,6 +383,42 @@ int proto_encode(const struct msg *m, char *out, size_t cap, size_t *out_len)
     case MT_EVENT:
         if (!cJSON_AddStringToObject(root, "text", m->text)) goto out;
         break;
+    case MT_PRIV:
+        if (!cJSON_AddStringToObject(root, "to", m->to) ||
+            !cJSON_AddStringToObject(root, "text", m->text))
+            goto out;
+        break;
+    case MT_LIST:
+    case MT_QUIT:
+        break;
+    case MT_USERS: {
+        /* O array é criado, preenchido e só DEPOIS pendurado no root: se
+         * falhar a meio é preciso apagá-lo à mão, porque ainda não é do root. */
+        cJSON *arr = cJSON_CreateArray();
+        if (arr == NULL)
+            goto out;
+        const char *p = m->nicks;
+        while (*p != '\0') {
+            char   one[PROTO_NICK_MAX + 1];
+            size_t n = strcspn(p, " ");     /* valid_users() garantiu n <= 32 */
+            memcpy(one, p, n);
+            one[n] = '\0';
+            cJSON *str = cJSON_CreateString(one);
+            if (str == NULL || !cJSON_AddItemToArray(arr, str)) {
+                cJSON_Delete(str);
+                cJSON_Delete(arr);
+                goto out;
+            }
+            p += n;
+            if (*p == ' ')
+                p++;
+        }
+        if (!cJSON_AddItemToObject(root, "nicks", arr)) {
+            cJSON_Delete(arr);
+            goto out;
+        }
+        break;
+    }
     }
 
     /* Unformatted, NUNCA cJSON_Print(): esse mete '\n' e indentação, e um

@@ -8,7 +8,8 @@
  * Numeração: 11-18 vêm da tabela em docs/milestones/M1.md (o #17, "MSG antes
  * de NICK", é da máquina de estados do servidor e é testado com ela);
  * 25-31 foram acrescentados ao desenhar o contrato; 32 (e a 2.a verificacao
- * do 12) nasceram de testes de mutacao.
+ * do 12) nasceram de testes de mutacao. 33 e do M2 (EVENT); 58-62 do M3
+ * (PRIV, LIST, QUIT, USERS, CHAT.to, regra de nicks, comparacao de nicks).
  */
 #include "protocol.h"
 #include "test_util.h"
@@ -132,8 +133,10 @@ static void caso_15_tipo_desconhecido(void)
     CHECK_INT(parse("{\"type\":\"nick\",\"nick\":\"ana\"}"), -1);
     CHECK_STR(err.reason, PROTO_R_TYPE);
 
-    CASE(15, "LIST ainda nao existe no M1 (entra no M3)");
-    CHECK_INT(parse("{\"type\":\"LIST\"}"), -1);
+    /* No M1/M2 aqui estava LIST (ainda nao existia). Desde o M3 todos os
+     * tipos do slide 124 existem; fica o case-sensitive dos novos. */
+    CASE(15, "\"list\" em minusculas nao e LIST");
+    CHECK_INT(parse("{\"type\":\"list\"}"), -1);
     CHECK_STR(err.reason, PROTO_R_TYPE);
 }
 
@@ -221,18 +224,21 @@ static void caso_26_limites(void)
 }
 
 /* 27. O pior caso do encode, que justifica o _Static_assert do protocol.h:
- *     from e text no limite, cheios de caracteres que o cJSON escapa (2x).
+ *     from/to e text no limite, o text cheio de caracteres que o cJSON escapa
+ *     (2x). Desde o M3 (D20) os nicks ja nao podem ter '"' nem '\\', por isso
+ *     o from deixou de crescer; em troca o CHAT privado ganhou o "to".
  *     Tem de caber numa linha do framing e ter UM so '\n', no fim. */
 static void caso_27_pior_caso_encode(void)
 {
     CASE(27, "pior CHAT cabe numa linha e tem um so '\\n'");
     struct msg c = { .type = MT_CHAT, .is_private = 1 };
-    memset(c.from, '"',  PROTO_NICK_MAX);
+    memset(c.from, 'f',  PROTO_NICK_MAX);
+    memset(c.to,   't',  PROTO_NICK_MAX);
     memset(c.text, '\\', PROTO_TEXT_MAX);
     size_t len = 0;
     CHECK_INT(proto_encode(&c, out, sizeof out, &len), 0);
     CHECK(len <= RX_MAX_LINE);
-    CHECK_INT(len, 52 + 2 * PROTO_NICK_MAX + 2 * PROTO_TEXT_MAX - 1); /* "true" e 1 mais curto que "false" */
+    CHECK_INT(len, PROTO_CHAT_OVERHEAD + 2 * PROTO_NICK_MAX + 2 * PROTO_TEXT_MAX - 1); /* "true" e 1 mais curto que "false" */
     CHECK(len >= 1 && memchr(out, '\n', sem_nl(len)) == NULL);
     CHECK_INT(out[sem_nl(len)], '\n');
 
@@ -240,6 +246,7 @@ static void caso_27_pior_caso_encode(void)
     CHECK_INT(proto_parse(out, sem_nl(len), &m, &err), 0);
     CHECK_INT(m.type, MT_CHAT);
     CHECK_MEM(m.from, c.from, PROTO_NICK_MAX + 1);
+    CHECK_MEM(m.to,   c.to,   PROTO_NICK_MAX + 1);
     CHECK_MEM(m.text, c.text, PROTO_TEXT_MAX + 1);
     CHECK_INT(m.is_private, 1);
 
@@ -420,6 +427,211 @@ static void caso_33_event(void)
     CHECK_INT(parse(json_with("EVENT", "text", 'e', PROTO_TEXT_MAX + 1)), -1);
 }
 
+
+/* 58. Os tres pedidos novos do M3 (slide 124): PRIV, LIST, QUIT. */
+static void caso_58_pedidos_m3(void)
+{
+    size_t len;
+
+    CASE(58, "PRIV do slide 124");
+    CHECK_INT(parse("{\"type\":\"PRIV\",\"to\":\"rui\",\"text\":\"hi\"}"), 0);
+    CHECK_INT(m.type, MT_PRIV);
+    CHECK_STR(m.to, "rui");
+    CHECK_STR(m.text, "hi");
+
+    CASE(58, "PRIV sem to, sem text, ou com to invalido -> 400 invalid field");
+    CHECK_INT(parse("{\"type\":\"PRIV\",\"text\":\"hi\"}"), -1);
+    CHECK_STR(err.reason, PROTO_R_FIELD);
+    CHECK_INT(parse("{\"type\":\"PRIV\",\"to\":\"rui\"}"), -1);
+    CHECK_INT(parse("{\"type\":\"PRIV\",\"to\":\"a b\",\"text\":\"hi\"}"), -1);
+    CHECK_INT(parse("{\"type\":\"PRIV\",\"to\":\"\",\"text\":\"hi\"}"), -1);
+    CHECK_INT(parse("{\"type\":\"PRIV\",\"to\":7,\"text\":\"hi\"}"), -1);
+
+    CASE(58, "LIST e QUIT nao tem campos (e campos extra sao ignorados)");
+    CHECK_INT(parse("{\"type\":\"LIST\"}"), 0);
+    CHECK_INT(m.type, MT_LIST);
+    CHECK_INT(parse("{\"type\":\"QUIT\",\"bye\":true}"), 0);
+    CHECK_INT(m.type, MT_QUIT);
+
+    CASE(58, "encode: os bytes exatos do slide 124");
+    struct msg p = { .type = MT_PRIV, .to = "rui", .text = "hi" };
+    CHECK_INT(proto_encode(&p, out, sizeof out, &len), 0);
+    CHECK_STR(out, "{\"type\":\"PRIV\",\"to\":\"rui\",\"text\":\"hi\"}\n");
+    struct msg l = { .type = MT_LIST };
+    CHECK_INT(proto_encode(&l, out, sizeof out, &len), 0);
+    CHECK_STR(out, "{\"type\":\"LIST\"}\n");
+    struct msg q = { .type = MT_QUIT };
+    CHECK_INT(proto_encode(&q, out, sizeof out, &len), 0);
+    CHECK_STR(out, "{\"type\":\"QUIT\"}\n");
+
+    CASE(58, "encode recusa PRIV sem destino");
+    struct msg bad = { .type = MT_PRIV, .text = "hi" };
+    CHECK_INT(proto_encode(&bad, out, sizeof out, &len), -1);
+
+    CASE(58, "proto_type_name dos novos");
+    CHECK_STR(proto_type_name(MT_PRIV), "PRIV");
+    CHECK_STR(proto_type_name(MT_LIST), "LIST");
+    CHECK_STR(proto_type_name(MT_QUIT), "QUIT");
+    CHECK_STR(proto_type_name(MT_USERS), "USERS");
+}
+
+/* 59. USERS: o primeiro array do protocolo. E o pior caso, que justifica o
+ *     D20 (nicks sem '"' nem '\'). */
+static void caso_59_users(void)
+{
+    size_t len;
+
+    CASE(59, "USERS do slide 124");
+    CHECK_INT(parse("{\"type\":\"USERS\",\"nicks\":[\"ana\",\"rui\"]}"), 0);
+    CHECK_INT(m.type, MT_USERS);
+    CHECK_INT(m.n_nicks, 2);
+    CHECK_STR(m.nicks, "ana rui");
+
+    CASE(59, "lista vazia e aceite");
+    CHECK_INT(parse("{\"type\":\"USERS\",\"nicks\":[]}"), 0);
+    CHECK_INT(m.n_nicks, 0);
+    CHECK_STR(m.nicks, "");
+
+    CASE(59, "nicks em falta, nao-array, elemento nao-string ou invalido -> 400");
+    CHECK_INT(parse("{\"type\":\"USERS\"}"), -1);
+    CHECK_STR(err.reason, PROTO_R_FIELD);
+    CHECK_INT(parse("{\"type\":\"USERS\",\"nicks\":\"ana rui\"}"), -1);
+    CHECK_INT(parse("{\"type\":\"USERS\",\"nicks\":[\"ana\",3]}"), -1);
+    CHECK_INT(parse("{\"type\":\"USERS\",\"nicks\":[\"ana\",\"a b\"]}"), -1);
+    CHECK_INT(parse("{\"type\":\"USERS\",\"nicks\":[\"\"]}"), -1);
+
+    CASE(59, "encode igual ao slide, construido com proto_users_add");
+    struct msg u = { .type = MT_USERS };
+    CHECK_INT(proto_users_add(&u, "ana"), 0);
+    CHECK_INT(proto_users_add(&u, "rui"), 0);
+    CHECK_INT(proto_encode(&u, out, sizeof out, &len), 0);
+    CHECK_STR(out, "{\"type\":\"USERS\",\"nicks\":[\"ana\",\"rui\"]}\n");
+
+    CASE(59, "e volta igual pelo parse");
+    CHECK_INT(proto_parse(out, sem_nl(len), &m, &err), 0);
+    CHECK_STR(m.nicks, "ana rui");
+    CHECK_INT(m.n_nicks, 2);
+
+    CASE(59, "USERS vazio codifica");
+    struct msg v = { .type = MT_USERS };
+    CHECK_INT(proto_encode(&v, out, sizeof out, &len), 0);
+    CHECK_STR(out, "{\"type\":\"USERS\",\"nicks\":[]}\n");
+
+    CASE(59, "proto_users_add recusa nick invalido e o 65.o");
+    struct msg w = { .type = MT_USERS };
+    CHECK_INT(proto_users_add(&w, "a b"), -1);
+    CHECK_INT(proto_users_add(&w, "a\"b"), -1);
+    char nk[PROTO_NICK_MAX + 1];
+    for (int i = 0; i < PROTO_USERS_MAX; i++) {
+        memset(nk, 'a' + i % 26, PROTO_NICK_MAX);    /* 32 bytes cada */
+        nk[PROTO_NICK_MAX] = '\0';
+        nk[0] = (char)('A' + i / 26);                /* para nao serem iguais */
+        CHECK_INT(proto_users_add(&w, nk), 0);
+    }
+    CHECK_INT(proto_users_add(&w, "mais1"), -1);
+    CHECK_INT(w.n_nicks, PROTO_USERS_MAX);
+
+    CASE(59, "pior USERS (64 nicks de 32 bytes) cabe numa linha");
+    CHECK_INT(proto_encode(&w, out, sizeof out, &len), 0);
+    CHECK_INT(len, PROTO_USERS_OVERHEAD + PROTO_USERS_MAX * (PROTO_NICK_MAX + 3) - 1);
+    CHECK(len <= RX_MAX_LINE);
+    CHECK_INT(proto_parse(out, sem_nl(len), &m, &err), 0);
+    CHECK_INT(m.n_nicks, PROTO_USERS_MAX);
+    CHECK(strcmp(m.nicks, w.nicks) == 0);
+
+    CASE(59, "encode recusa a string empacotada mal formada");
+    struct msg x = { .type = MT_USERS, .nicks = "ana  rui", .n_nicks = 2 };
+    CHECK_INT(proto_encode(&x, out, sizeof out, &len), -1);
+    struct msg y = { .type = MT_USERS, .nicks = "ana rui ", .n_nicks = 2 };
+    CHECK_INT(proto_encode(&y, out, sizeof out, &len), -1);
+    struct msg z = { .type = MT_USERS, .nicks = "ana rui", .n_nicks = 3 };
+    CHECK_INT(proto_encode(&z, out, sizeof out, &len), -1);
+
+    CASE(59, "a receber nao ha limite de contagem: 300 nicks curtos cabem");
+    int k = snprintf(big, sizeof big, "{\"type\":\"USERS\",\"nicks\":[");
+    for (int i = 0; i < 300; i++)
+        k += snprintf(big + k, sizeof big - (size_t)k, "%s\"u%d\"", i ? "," : "", i);
+    snprintf(big + k, sizeof big - (size_t)k, "]}");
+    CHECK_INT(parse(big), 0);
+    CHECK_INT(m.n_nicks, 300);
+}
+
+/* 60. CHAT privado com "to" (D14, extensao nossa). */
+static void caso_60_chat_to(void)
+{
+    size_t len;
+
+    CASE(60, "CHAT privado leva \"to\"");
+    struct msg c = { .type = MT_CHAT, .from = "ana", .to = "rui", .text = "hi", .is_private = 1 };
+    CHECK_INT(proto_encode(&c, out, sizeof out, &len), 0);
+    CHECK_STR(out, "{\"type\":\"CHAT\",\"from\":\"ana\",\"to\":\"rui\",\"text\":\"hi\",\"private\":true}\n");
+    CHECK_INT(proto_parse(out, sem_nl(len), &m, &err), 0);
+    CHECK_STR(m.to, "rui");
+    CHECK_INT(m.is_private, 1);
+
+    CASE(60, "CHAT sem \"to\" (o do slide, ou de outro grupo) -> to = \"\"");
+    CHECK_INT(parse("{\"type\":\"CHAT\",\"from\":\"ana\",\"text\":\"hi\",\"private\":true}"), 0);
+    CHECK_STR(m.to, "");
+
+    CASE(60, "\"to\" presente mas nao-string -> 400 (como o \"private\")");
+    CHECK_INT(parse("{\"type\":\"CHAT\",\"from\":\"ana\",\"text\":\"hi\",\"to\":1}"), -1);
+}
+
+/* 61. Regra de nicks (D20): estrita a enviar, larga a receber. */
+static void caso_61_regra_de_nicks(void)
+{
+    CASE(61, "NICK com '\"' ou '\\' -> 400 (D20)");
+    CHECK_INT(parse("{\"type\":\"NICK\",\"nick\":\"a\\\"b\"}"), -1);
+    CHECK_INT(parse("{\"type\":\"NICK\",\"nick\":\"a\\\\b\"}"), -1);
+    CHECK_INT(proto_valid_nick("a\"b"), 0);
+    CHECK_INT(proto_valid_nick("a\\b"), 0);
+
+    CASE(61, "outros simbolos e UTF-8 continuam aceites");
+    CHECK_INT(proto_valid_nick("ana_99-x.y"), 1);
+    CHECK_INT(proto_valid_nick("z\xC3\xA9"), 1);
+
+    CASE(61, "um CHAT de um servidor com aspas no from e aceite (tolerante)");
+    CHECK_INT(parse("{\"type\":\"CHAT\",\"from\":\"a\\\"b\",\"text\":\"oi\"}"), 0);
+    CHECK_STR(m.from, "a\"b");
+
+    CASE(61, "... e um USERS tambem");
+    CHECK_INT(parse("{\"type\":\"USERS\",\"nicks\":[\"a\\\\b\"]}"), 0);
+    CHECK_STR(m.nicks, "a\\b");
+
+    CASE(61, "mas espacos no from continuam proibidos: partiriam o USERS e o /msg");
+    CHECK_INT(parse("{\"type\":\"CHAT\",\"from\":\"a b\",\"text\":\"oi\"}"), -1);
+
+    CASE(61, "nunca ENVIAMOS o que so aceitamos por tolerancia");
+    struct msg c = { .type = MT_CHAT, .from = "a\"b", .text = "oi" };
+    size_t len;
+    CHECK_INT(proto_encode(&c, out, sizeof out, &len), -1);
+}
+
+/* 62. "E o mesmo nick?" (D18): maiusculas ASCII ignoradas, UTF-8 nao. */
+static void caso_62_nick_eq(void)
+{
+    CASE(62, "maiusculas ASCII ignoradas");
+    CHECK_INT(proto_nick_eq("ana", "ana"), 1);
+    CHECK_INT(proto_nick_eq("Ana", "aNA"), 1);
+    CHECK_INT(proto_nick_eq("ana", "ana2"), 0);
+    CHECK_INT(proto_nick_eq("ana2", "ana"), 0);
+    CHECK_INT(proto_nick_eq("", ""), 1);
+
+    CASE(62, "bytes >= 0x80 comparados tal e qual: Ze com acento != ZE com acento");
+    CHECK_INT(proto_nick_eq("z\xC3\xA9", "Z\xC3\xA9"), 1);     /* so o Z muda */
+    CHECK_INT(proto_nick_eq("z\xC3\xA9", "z\xC3\x89"), 0);     /* e vs E com acento */
+
+    CASE(62, "simbolos nao sao dobrados: '[' nao e '{'");
+    CHECK_INT(proto_nick_eq("a[", "a{"), 0);
+
+    CASE(62, "ordem do USERS: alfabetica sem olhar a maiusculas, empate pelos bytes");
+    CHECK(proto_nick_cmp("ana", "Rui") < 0);
+    CHECK(proto_nick_cmp("rui", "Ana") > 0);
+    CHECK(proto_nick_cmp("ana", "anabela") < 0);
+    CHECK(proto_nick_cmp("Ana", "ana") < 0);
+    CHECK_INT(proto_nick_cmp("ana", "ana"), 0);
+}
+
 /* ------------------------------------------------------------------------ */
 
 int main(void)
@@ -440,5 +652,10 @@ int main(void)
     caso_31_exemplos_do_slide();
     caso_32_chaves_case_sensitive();
     caso_33_event();
+    caso_58_pedidos_m3();
+    caso_59_users();
+    caso_60_chat_to();
+    caso_61_regra_de_nicks();
+    caso_62_nick_eq();
     return t_report("protocol");
 }

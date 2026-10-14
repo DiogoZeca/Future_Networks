@@ -1,5 +1,6 @@
 /*
- * M2 — servidor de chat multiutilizador: uma thread por cliente.
+ * M3 — servidor de chat multiutilizador: uma thread por cliente, com os
+ * comandos do slide 124 (PRIV, LIST, QUIT) e nicks únicos.
  *
  * Por cada ligação, numa thread própria:
  *
@@ -53,6 +54,20 @@
  *
  * A mensagem é codificada UMA vez e os mesmos bytes vão para toda a gente:
  * é mais barato e garante que todos recebem exatamente o mesmo.
+ *
+ *
+ * O QUE MUDOU DO M2 PARA O M3
+ * ---------------------------
+ * Pouco, e de propósito: as decisões novas (409, 404, USERS, QUIT) estão
+ * todas na session. Aqui há só três coisas novas:
+ *
+ *   - o DIRETÓRIO de cada ligação (dir_claim/dir_lookup/dir_nicks): as
+ *     perguntas da session ("está livre?", "existe?", "quem está?")
+ *     respondidas pelo roster;
+ *   - o destino SESS_TO (PRIV): roster_find() com refcount, como o retrato
+ *     (regra 2), e o envio fora do lock com prazo (regras 1 e 4);
+ *   - o QUIT: depois de enviar o OK, a session fica CLOSED e o serve()
+ *     termina — a saída é a mesma de uma queda (roster_remove + "x left").
  *
  * Uso: ./bin/server [porta]
  */
@@ -146,6 +161,22 @@ static int deliver(struct client *from, const struct sess_out *o)
     if (o->dest == SESS_SELF)
         return send_line_to(from, line, len);
 
+    if (o->dest == SESS_TO) {
+        /* PRIV (M3). find() dá +1 referência dentro do lock, pela mesma razão
+         * do retrato (regra 2): o destino pode sair enquanto lhe enviamos.
+         * Se já saiu desde que a session verificou que existia, a mensagem
+         * perde-se sem erro — como um broadcast a quem saiu a meio. */
+        struct client *to = roster_find(&R, o->msg.to);
+        if (to == NULL) {
+            printf("[server] %s: PRIV para %s, que entretanto saiu\n",
+                   from->who, o->msg.to);
+            return 0;
+        }
+        send_line_to(to, line, len);        /* falhar aqui é problema DELE */
+        client_release(&R, to);
+        return 0;
+    }
+
     /* Retrato DENTRO do lock (regra 1), com refcount (regra 2). */
     struct client *snap[ROSTER_MAX];
     size_t n = roster_snapshot(&R, snap, ROSTER_MAX,
@@ -162,6 +193,29 @@ static int deliver(struct client *from, const struct sess_out *o)
         client_release(&R, snap[i]);
 
     return 0;
+}
+
+/* ---- O diretório de uma ligação (M3) ----------------------------------- */
+
+/* As três perguntas da session (session.h), respondidas pelo roster. O ctx é
+ * o próprio cliente: o claim tem de saber QUEM reserva. Cada uma é uma única
+ * operação do roster, com o lock lá dentro — em especial o claim, onde
+ * "verificar" e "reservar" não podem estar separados (test_roster #18). */
+static int dir_claim(void *ctx, const char *nick)
+{
+    return roster_claim(&R, ctx, nick);
+}
+
+static int dir_lookup(void *ctx, const char *nick, char canon[PROTO_NICK_MAX + 1])
+{
+    (void)ctx;
+    return roster_lookup(&R, nick, canon);
+}
+
+static size_t dir_nicks(void *ctx, char (*out)[PROTO_NICK_MAX + 1], size_t cap)
+{
+    (void)ctx;
+    return roster_nicks(&R, out, cap);
 }
 
 /* ---- Uma ligação -------------------------------------------------------- */
@@ -257,6 +311,21 @@ static void serve(struct client *c, struct session *sess)
                     joined = 1;
                 }
             }
+
+            /* QUIT (D17): o OK já seguiu. Parar de ler e sair como numa
+             * queda — o client_thread() faz o roster_remove() e o "x left".
+             * O que vier depois do QUIT, mesmo que já esteja no rxbuf, é
+             * ignorado. O shutdown(SHUT_WR) manda já o FIN, a seguir ao OK:
+             * o cliente vê o fecho sem esperar pelo close() do refcount.
+             * (Se o cliente tiver mandado mais bytes depois do QUIT, o close()
+             * final pode sair como RST — o mesmo problema do "line too long",
+             * para o M4.) */
+            if (sess->state == SESS_CLOSED) {
+                printf("[server] %s (%s) pediu QUIT\n", c->who,
+                       sess->nick[0] ? sess->nick : "sem nick");
+                shutdown(c->fd, SHUT_WR);
+                return;
+            }
         }
     }
 }
@@ -264,10 +333,11 @@ static void serve(struct client *c, struct session *sess)
 /* O corpo de cada thread. Recebe a referência que o roster_add() lhe deu. */
 static void *client_thread(void *arg)
 {
-    struct client *c = arg;
-    struct session sess;
+    struct client  *c   = arg;
+    struct session  sess;
+    struct sess_dir dir = { c, dir_claim, dir_lookup, dir_nicks };
 
-    session_init(&sess);
+    session_init(&sess, &dir);
     serve(c, &sess);
 
     /* Tirar da lista ANTES de anunciar a saída: assim o retrato do EVENT já

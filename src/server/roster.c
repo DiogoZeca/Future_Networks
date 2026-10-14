@@ -177,3 +177,69 @@ size_t roster_count(struct roster *r)
     pthread_mutex_unlock(&r->lock);
     return n;
 }
+
+/* ---- Nicks (M3) --------------------------------------------------------- */
+
+/* Quem na lista (que não `self`) tem este nick? Chamar com r->lock. Percorre
+ * TODOS, não só os joined: quem reservou e ainda não entrou também conta. */
+static struct client *nick_owner_locked(struct roster *r, const char *nick,
+                                        const struct client *self, int joined_only)
+{
+    for (size_t i = 0; i < r->n; i++) {
+        struct client *o = r->v[i];
+        if (o == self || o->nick[0] == '\0')
+            continue;
+        if (joined_only && !o->joined)
+            continue;
+        if (proto_nick_eq(o->nick, nick))
+            return o;
+    }
+    return NULL;
+}
+
+int roster_claim(struct roster *r, struct client *c, const char *nick)
+{
+    int ok = 0;
+
+    pthread_mutex_lock(&r->lock);
+    /* A verificação e a escrita NO MESMO lock: é isto que torna os nicks
+     * únicos mesmo com dois NICK iguais a chegar no mesmo instante. */
+    if (nick_owner_locked(r, nick, c, 0) == NULL) {
+        snprintf(c->nick, sizeof c->nick, "%s", nick);
+        ok = 1;
+    }
+    pthread_mutex_unlock(&r->lock);
+    return ok;
+}
+
+int roster_lookup(struct roster *r, const char *nick, char canon[PROTO_NICK_MAX + 1])
+{
+    pthread_mutex_lock(&r->lock);
+    struct client *o = nick_owner_locked(r, nick, NULL, 1);
+    if (o != NULL && canon != NULL)
+        memcpy(canon, o->nick, PROTO_NICK_MAX + 1);
+    pthread_mutex_unlock(&r->lock);
+    return o != NULL;
+}
+
+struct client *roster_find(struct roster *r, const char *nick)
+{
+    pthread_mutex_lock(&r->lock);
+    struct client *o = nick_owner_locked(r, nick, NULL, 1);
+    if (o != NULL)
+        o->refs++;                  /* dentro do lock, como no retrato (D7) */
+    pthread_mutex_unlock(&r->lock);
+    return o;
+}
+
+size_t roster_nicks(struct roster *r, char (*out)[PROTO_NICK_MAX + 1], size_t cap)
+{
+    size_t n = 0;
+
+    pthread_mutex_lock(&r->lock);
+    for (size_t i = 0; i < r->n && n < cap; i++)
+        if (r->v[i]->joined)
+            memcpy(out[n++], r->v[i]->nick, PROTO_NICK_MAX + 1);
+    pthread_mutex_unlock(&r->lock);
+    return n;
+}

@@ -1,0 +1,10 @@
+# LIST -> USERS com toda a gente no chat, incluindo quem pediu, por ordem
+# alfabetica (D16, proposta). Quem ainda nao fez NICK nao aparece.
+a> {"type":"NICK","nick":"zed"}
+a< {"type":"OK"}
+b> {"type":"NICK","nick":"ana"}
+b< {"type":"OK"}
+c> {"type":"MSG","text":"ainda sem nick"}
+c< {"type":"ERROR","code":401}
+b> {"type":"LIST"}
+b< {"type":"USERS","nicks":["ana","zed"]}

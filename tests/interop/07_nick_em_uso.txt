@@ -1,0 +1,10 @@
+# Nicks unicos (slide 123): o 2.o "ana" -> ERROR 409 (slide 124).
+# Sem olhar a maiusculas (D18, proposta) e a ligacao continua (D19, proposta).
+a> {"type":"NICK","nick":"ana"}
+a< {"type":"OK"}
+b> {"type":"NICK","nick":"ana"}
+b< {"type":"ERROR","code":409}
+b> {"type":"NICK","nick":"ANA"}
+b< {"type":"ERROR","code":409}
+b> {"type":"NICK","nick":"rui"}
+b< {"type":"OK"}

@@ -1,7 +1,8 @@
 /*
  * test_ui.c — testes da parte pura do cliente (include/ui.h).
  *
- * Numeração: 40-46, a seguir aos da session.
+ * Numeração: 40-47, a seguir aos da session (M1/M2); 71-75 com os comandos
+ * e o USERS (M3).
  */
 #include "ui.h"
 #include "test_util.h"
@@ -162,6 +163,136 @@ static void caso_47_event(void)
     CHECK_INT(strlen(curto), sizeof curto - 1);
 }
 
+
+/* ---- M3: comandos ------------------------------------------------------- */
+
+/* 71. /list e /quit. */
+static void caso_71_list_quit(void)
+{
+    CASE(71, "/list -> LIST");
+    CHECK_INT(ui_input_to_msg("/list\n", &m, &why), UI_SEND);
+    CHECK_INT(m.type, MT_LIST);
+    CHECK_INT(proto_encode(&m, shown, sizeof shown, NULL), 0);
+    CHECK_STR(shown, "{\"type\":\"LIST\"}\n");
+
+    CASE(71, "/quit -> QUIT (espacos no fim tolerados)");
+    CHECK_INT(ui_input_to_msg("/quit  \r\n", &m, &why), UI_SEND);
+    CHECK_INT(m.type, MT_QUIT);
+
+    CASE(71, "/list com argumentos -> erro local, nada enviado");
+    why = NULL;
+    CHECK_INT(ui_input_to_msg("/list todos\n", &m, &why), UI_BAD);
+    CHECK_STR(why, UI_WHY_ARGS);
+    CHECK_INT(m.type, 0);
+}
+
+/* 72. /msg <nick> <texto> -> PRIV. */
+static void caso_72_msg(void)
+{
+    CASE(72, "/msg rui ola -> PRIV com os bytes do slide");
+    CHECK_INT(ui_input_to_msg("/msg rui hi\n", &m, &why), UI_SEND);
+    CHECK_INT(m.type, MT_PRIV);
+    CHECK_STR(m.to, "rui");
+    CHECK_STR(m.text, "hi");
+    CHECK_INT(proto_encode(&m, shown, sizeof shown, NULL), 0);
+    CHECK_STR(shown, "{\"type\":\"PRIV\",\"to\":\"rui\",\"text\":\"hi\"}\n");
+
+    CASE(72, "o texto fica tal e qual, com espacos (parte so no 1.o)");
+    CHECK_INT(ui_input_to_msg("/msg rui  dois  espacos \n", &m, &why), UI_SEND);
+    CHECK_STR(m.to, "rui");
+    CHECK_STR(m.text, " dois  espacos ");
+
+    CASE(72, "espacos a mais antes do nick sao tolerados");
+    CHECK_INT(ui_input_to_msg("/msg   rui oi\n", &m, &why), UI_SEND);
+    CHECK_STR(m.to, "rui");
+
+    CASE(72, "/msg sem nick ou sem texto -> uso");
+    why = NULL;
+    CHECK_INT(ui_input_to_msg("/msg\n", &m, &why), UI_BAD);
+    CHECK_STR(why, UI_WHY_MSG_USE);
+    CHECK_INT(ui_input_to_msg("/msg rui\n", &m, &why), UI_BAD);
+    CHECK_STR(why, UI_WHY_MSG_USE);
+    CHECK_INT(ui_input_to_msg("/msg rui \n", &m, &why), UI_BAD);
+    CHECK_STR(why, UI_WHY_MSG_USE);
+    CHECK_INT(m.type, 0);
+
+    CASE(72, "nick invalido (aspas, D20; ou 33 bytes) -> erro local");
+    CHECK_INT(ui_input_to_msg("/msg a\"b oi\n", &m, &why), UI_BAD);
+    CHECK_STR(why, UI_WHY_BADNICK);
+    CHECK_INT(ui_input_to_msg("/msg 123456789012345678901234567890123 oi\n", &m, &why), UI_BAD);
+    CHECK_STR(why, UI_WHY_BADNICK);
+
+    CASE(72, "texto com controlo ou longo demais -> o mesmo motivo do MSG");
+    CHECK_INT(ui_input_to_msg("/msg rui a\tb\n", &m, &why), UI_BAD);
+    CHECK_STR(why, UI_WHY_CONTROL);
+    static char longo[PROTO_TEXT_MAX + 32];
+    strcpy(longo, "/msg rui ");
+    memset(longo + 9, 'x', PROTO_TEXT_MAX + 1);
+    longo[9 + PROTO_TEXT_MAX + 1] = '\0';
+    CHECK_INT(ui_input_to_msg(longo, &m, &why), UI_BAD);
+    CHECK_STR(why, UI_WHY_TOOLONG);
+    longo[9 + PROTO_TEXT_MAX] = '\0';                /* exatamente 1024: passa */
+    CHECK_INT(ui_input_to_msg(longo, &m, &why), UI_SEND);
+}
+
+/* 73. /help, comandos desconhecidos e "//". */
+static void caso_73_outros(void)
+{
+    CASE(73, "/help -> UI_HELP, nada a enviar");
+    CHECK_INT(ui_input_to_msg("/help\n", &m, &why), UI_HELP);
+    CHECK_INT(m.type, 0);
+
+    CASE(73, "comando desconhecido -> erro local (nao vai para o chat por engano)");
+    why = NULL;
+    CHECK_INT(ui_input_to_msg("/lsit\n", &m, &why), UI_BAD);
+    CHECK_STR(why, UI_WHY_UNKNOWN);
+    CHECK_INT(ui_input_to_msg("/\n", &m, &why), UI_BAD);
+    CHECK_INT(ui_input_to_msg("/msgrui oi\n", &m, &why), UI_BAD);
+    CHECK_STR(why, UI_WHY_UNKNOWN);
+
+    CASE(73, "//texto -> MSG \"/texto\"");
+    CHECK_INT(ui_input_to_msg("//list nao e comando\n", &m, &why), UI_SEND);
+    CHECK_INT(m.type, MT_MSG);
+    CHECK_STR(m.text, "/list nao e comando");
+
+    CASE(73, "uma '/' a meio nao e comando");
+    CHECK_INT(ui_input_to_msg("a/list\n", &m, &why), UI_SEND);
+    CHECK_INT(m.type, MT_MSG);
+}
+
+/* 74. Mostrar um CHAT privado (D14). */
+static void caso_74_privado(void)
+{
+    CASE(74, "com \"to\": diz de quem e para quem");
+    struct msg c = { .type = MT_CHAT, .from = "ana", .to = "rui", .text = "hi", .is_private = 1 };
+    ui_format(&c, shown, sizeof shown);
+    CHECK_STR(shown, "<ana -> rui> (privado) hi");
+
+    CASE(74, "sem \"to\" (servidor de outro grupo): como no M2");
+    c.to[0] = '\0';
+    ui_format(&c, shown, sizeof shown);
+    CHECK_STR(shown, "<ana> (privado) hi");
+}
+
+/* 75. Mostrar um USERS. */
+static void caso_75_users(void)
+{
+    CASE(75, "USERS -> [online: N] nicks");
+    struct msg u = { .type = MT_USERS };
+    proto_users_add(&u, "ana");
+    proto_users_add(&u, "rui");
+    ui_format(&u, shown, sizeof shown);
+    CHECK_STR(shown, "[online: 2] ana rui");
+
+    CASE(75, "USERS vazio");
+    struct msg v = { .type = MT_USERS };
+    ui_format(&v, shown, sizeof shown);
+    CHECK_STR(shown, "[online: 0]");
+
+    CASE(75, "nao cai no default \"[?]\"");
+    CHECK(strcmp(shown, "[?]") != 0);
+}
+
 int main(void)
 {
     caso_40_linha_normal();
@@ -172,5 +303,10 @@ int main(void)
     caso_45_truncar();
     caso_46_nick_argv();
     caso_47_event();
+    caso_71_list_quit();
+    caso_72_msg();
+    caso_73_outros();
+    caso_74_privado();
+    caso_75_users();
     return t_report("ui");
 }

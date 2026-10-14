@@ -7,10 +7,14 @@
  *
  *   socket -> framing -> [ session: protocol + estado ] -> saídas -> socket(s)
  *
- *        NICK válido             MSG
- *   AWAITING_NICK ──────▶ READY ──────▶ CHAT a toda a gente (M2)
- *        │  OK + EVENT        │
- *        │ MSG → ERROR 401    │ NICK → ERROR 400
+ *        NICK válido e livre         MSG  → CHAT a todos (M2)
+ *   AWAITING_NICK ──────────▶ READY  PRIV → CHAT privado a um (M3)
+ *     │  OK + EVENT             │    LIST → USERS (M3)
+ *     │                         │    NICK → ERROR 400
+ *     │ MSG/PRIV/LIST → 401     │
+ *     │ NICK em uso   → 409     │ QUIT → OK
+ *     │ QUIT → OK               ▼
+ *     └──────────────────────▶ CLOSED   (o main.c fecha a ligação)
  *
  *
  * O QUE MUDOU DO M1 PARA O M2
@@ -48,6 +52,36 @@
  * TO AGREE com os outros grupos: o texto exato dos EVENT ("ana joined" /
  * "ana left", do slide 124) e quem os recebe (aqui: todos menos o próprio —
  * quem entra não precisa de ser avisado de que entrou).
+ *
+ *
+ * O QUE MUDOU DO M2 PARA O M3
+ * ---------------------------
+ * Três dos pedidos novos precisam de saber quem MAIS está ligado: um NICK
+ * tem de ser único (409), um PRIV tem de ter destino (404), e o LIST
+ * devolve a lista. Isso está no roster — que a session não pode conhecer, ou
+ * deixava de se testar sem rede e sem threads.
+ *
+ * Daí `struct sess_dir`, um "diretório": três funções que a session chama
+ * sem saber o que está por trás. No servidor é o roster (main.c); nos testes
+ * é um array (test_session.c). As DECISÕES continuam todas aqui — o diretório
+ * só responde a perguntas ("está livre?", "existe?", "quem está?").
+ *
+ * DECISÕES DO M3 (PROTOCOL.md §4, todas PROPOSTA):
+ *   D13 cada pedido tem UMA resposta direta: NICK → OK, MSG → o próprio
+ *       CHAT, PRIV → a cópia do CHAT, LIST → USERS, QUIT → OK (ou um ERROR).
+ *   D14 PRIV: o destino recebe CHAT com private:true; o emissor recebe uma
+ *       CÓPIA (como no D5, não há eco local). O CHAT leva "to" com o nick
+ *       do destino. A si próprio: entregue uma vez só.
+ *   D15 PRIV para um nick que não está no chat → ERROR 404 "no such nick".
+ *   D16 USERS: quem está no chat, INCLUINDO o próprio, por ordem alfabética
+ *       (proto_nick_cmp). Quem ainda não fez NICK não aparece.
+ *   D17 QUIT → OK e a ligação fecha (estado CLOSED); os outros recebem
+ *       "<nick> left". Funciona também ANTES do NICK (sair é sempre possível).
+ *   D18 "o mesmo nick" = proto_nick_eq() (sem olhar a maiúsculas ASCII).
+ *   D19 NICK em uso → ERROR 409 "nick taken"; o estado NÃO muda: o cliente
+ *       pode tentar outro na mesma ligação.
+ *   -   PRIV e LIST antes do NICK → ERROR 401, como o MSG.
+ *   -   USERS vindo de um cliente → ERROR 400 "unexpected type" (é S → C).
  */
 #ifndef SESSION_H
 #define SESSION_H
@@ -60,22 +94,45 @@
 #define SESS_R_NICK_SET      "nick already set"
 #define SESS_R_UNEXPECTED    "unexpected type"
 #define SESS_R_TOOLONG       "line too long"     /* usado pelo main.c */
+#define SESS_R_NICK_TAKEN    "nick taken"        /* 409, o texto do slide 124 */
+#define SESS_R_NO_SUCH_NICK  "no such nick"      /* 404 */
 
 enum sess_state {
     SESS_AWAITING_NICK = 0,   /* 0 de propósito: uma session a zeros é o início */
-    SESS_READY
+    SESS_READY,
+    SESS_CLOSED               /* depois de um QUIT: o main.c fecha a ligação */
+};
+
+/* O "diretório": o que a session precisa de perguntar sobre os OUTROS.
+ * Todas as funções recebem `ctx` tal e qual. Nenhuma pode ser NULL. */
+struct sess_dir {
+    void *ctx;
+
+    /* Reserva `nick` para ESTA ligação se mais ninguém o tiver (D18).
+     * 1 = reservado, 0 = em uso. Tem de ser atómico (roster_claim). */
+    int (*claim)(void *ctx, const char *nick);
+
+    /* Há alguém NO CHAT com este nick? 1 e o nick tal como foi registado em
+     * canon; ou 0. */
+    int (*lookup)(void *ctx, const char *nick, char canon[PROTO_NICK_MAX + 1]);
+
+    /* Os nicks de quem está no chat (incluindo esta ligação, se já entrou),
+     * por qualquer ordem. Devolve quantos (no máximo cap). */
+    size_t (*nicks)(void *ctx, char (*out)[PROTO_NICK_MAX + 1], size_t cap);
 };
 
 struct session {
-    enum sess_state state;
-    char nick[PROTO_NICK_MAX + 1];   /* só tem significado em SESS_READY */
+    enum sess_state        state;
+    char                   nick[PROTO_NICK_MAX + 1]; /* "" até um NICK ser aceite */
+    const struct sess_dir *dir;
 };
 
 /* Para quem vai uma saída. O main.c traduz isto em fds através do roster. */
 enum sess_dest {
     SESS_SELF = 0,   /* só a quem enviou a linha                            */
     SESS_ALL,        /* todos os ligados, INCLUINDO o emissor (D5)          */
-    SESS_OTHERS      /* todos menos o emissor (os EVENT de entrada e saída) */
+    SESS_OTHERS,     /* todos menos o emissor (os EVENT de entrada e saída) */
+    SESS_TO          /* só quem tem o nick msg.to (PRIV, M3)                */
 };
 
 struct sess_out {
@@ -84,17 +141,21 @@ struct sess_out {
 };
 
 /* Máximo de saídas que uma linha pode produzir. São 2: o NICK aceite dá OK +
- * EVENT. Se um dia passar a 3, o _Static_assert no .c obriga a reparar nisso
- * em vez de truncar em silêncio. */
+ * EVENT, e o PRIV dá o CHAT ao destino + a cópia ao emissor. */
 #define SESS_MAX_OUT 2
 
-void session_init(struct session *s);
+/* Começa em AWAITING_NICK, com o diretório desta ligação. */
+void session_init(struct session *s, const struct sess_dir *dir);
 
 /* Trata UMA linha (sem o '\n', `len` do framing) e escreve as saídas em out[].
  *
- * Devolve quantas saídas produziu (1 ou 2; nunca 0 no M2 — toda a linha tem
- * resposta, nem que seja um ERROR). `cap` deve ser >= SESS_MAX_OUT; com menos,
- * devolve só as que couberem.
+ * Devolve quantas saídas produziu (1 ou 2 — toda a linha tem resposta, nem
+ * que seja um ERROR). `cap` deve ser >= SESS_MAX_OUT; com menos, devolve só
+ * as que couberem. Em SESS_CLOSED devolve 0: depois do QUIT não se responde a
+ * mais nada (o main.c já não devia ter chamado).
+ *
+ * Depois de chamar, se s->state == SESS_CLOSED, o main.c envia as saídas e
+ * fecha a ligação (QUIT, D17).
  *
  * Todas as saídas são codificáveis: proto_encode() nunca falha com elas (os
  * testes verificam-no em todos os casos). */
@@ -103,8 +164,8 @@ size_t session_handle(struct session *s, const char *line, size_t len,
 
 /* O EVENT de saída, para quando a ligação fecha.
  *
- * Não vem de nenhuma linha — vem do fim do ciclo de recv() —, por isso é uma
- * função à parte. Devolve 1 e preenche *out se houver algo a anunciar, ou 0 se
+ * Não vem de nenhuma linha — vem do fim do ciclo de recv(), ou do QUIT —, por
+ * isso é uma função à parte. Um QUIT e uma queda dão o mesmo "<nick> left". Devolve 1 e preenche *out se houver algo a anunciar, ou 0 se
  * o cliente se foi embora ANTES de escolher nick: ninguém sabia que ele estava
  * lá, por isso não faz sentido avisar que saiu.
  *

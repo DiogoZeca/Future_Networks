@@ -1,0 +1,7 @@
+# PRIV para um nick que nao esta -> ERROR 404 (D15, proposta); continua.
+> {"type":"NICK","nick":"ana"}
+< {"type":"OK"}
+> {"type":"PRIV","to":"ninguem","text":"ola?"}
+< {"type":"ERROR","code":404}
+> {"type":"MSG","text":"ainda aqui"}
+< {"type":"CHAT","from":"ana","text":"ainda aqui"}

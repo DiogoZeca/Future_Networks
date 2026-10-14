@@ -1,0 +1,10 @@
+# QUIT -> OK e o servidor fecha (D17, proposta); os outros veem "<nick> left".
+# O rui entra primeiro para a ana nao ter um "rui joined" a frente do "left".
+b> {"type":"NICK","nick":"rui"}
+b< {"type":"OK"}
+a> {"type":"NICK","nick":"ana"}
+a< {"type":"OK"}
+b> {"type":"QUIT"}
+b< {"type":"OK"}
+b< CLOSED
+a< {"type":"EVENT","text":"rui left"}

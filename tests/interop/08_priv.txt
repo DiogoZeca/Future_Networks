@@ -1,0 +1,14 @@
+# PRIV (slide 124) -> o destino recebe CHAT com private:true; o emissor recebe
+# uma copia (D14, proposta). O "to" no CHAT e extensao nossa: nao se verifica.
+a> {"type":"NICK","nick":"ana"}
+a< {"type":"OK"}
+b> {"type":"NICK","nick":"rui"}
+b< {"type":"OK"}
+c> {"type":"NICK","nick":"zed"}
+c< {"type":"OK"}
+a> {"type":"PRIV","to":"rui","text":"so para ti"}
+b< {"type":"CHAT","from":"ana","text":"so para ti","private":true}
+a< {"type":"CHAT","from":"ana","text":"so para ti","private":true}
+# O zed nao pode ter recebido o PRIV: a 1.a coisa que ve depois e o seu USERS.
+c> {"type":"LIST"}
+c< {"type":"USERS"}

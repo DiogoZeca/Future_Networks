@@ -25,8 +25,12 @@ aguentar (slide 125):
 | `colado` | as linhas `>` seguidas num só `send()` | mensagens coladas num `recv()` |
 | `byte-a-byte` | um `send()` por byte, com `TCP_NODELAY` | mensagens partidas em muitos `recv()` |
 
+Desde o M3 um cenário pode usar **várias ligações** (`a>`, `b<`, ...), esperar
+o fecho (`< CLOSED`) e salta os `EVENT` que não estiver à espera — formato em
+`tests/interop/README.md`.
+
 Ao contrário do `probe_m0.py`, este é passa/falha: devolve `0` se tudo passou.
-Resultado atual contra o nosso servidor: **18 ok, 0 falhas**.
+Resultado atual contra o nosso servidor: **36 ok, 0 falhas** (12 cenários × 3 modos).
 
 ---
 
@@ -67,6 +71,32 @@ As secções 6–8 falham contra a primeira versão do M2: cada uma é um bug qu
 existiu (`docs/milestones/M2.md`, "Revisão do M2"). O log do servidor vai para
 um ficheiro temporário e não para um pipe — um pipe que ninguém lê enche e
 **para o servidor** (nota 6 do M2.md).
+
+---
+
+## `probe_m3.py`
+
+Verificação dos comandos do M3, no mesmo estilo do `probe_m2.py`: arranca o
+seu próprio `./bin/server` (porta 5310) e liga clientes a sério. Passa/falha.
+
+```sh
+make
+python3 scripts/probe_m3.py
+```
+
+| § | Cenário | O que prova |
+|---|---|---|
+| 1 | 50 rondas de 8 `NICK` iguais no mesmo instante | sempre 1 `OK` e 7 × `409` (verificar e reservar é atómico) |
+| 2 | `ANA` com `ana` ligada, depois outro nick na mesma ligação | 409 sem olhar a maiúsculas; a ligação continua |
+| 3 | `PRIV` para alguém, a si próprio, para quem não existe | só o destino recebe, a cópia volta, 404 |
+| 4 | 1500 `PRIV` para quem entra e sai sem parar | só cópias ou 404; o servidor sobrevive |
+| 5 | 64 clientes com nicks de 32 bytes e um `LIST` | 64 nicks ordenados numa linha |
+| 6 | `QUIT` e um `MSG` colados | `OK`, fecho, `left` aos outros, o `MSG` ignorado, nick livre |
+| 7 | o nosso `./bin/client` com o stdin preparado | 409 → pede outro nick, `/list`, `/msg`, `/lsit` recusado, `/quit` |
+
+Atenção a um pormenor do Python que enganou a primeira versão: `sock.close()`
+não fecha a ligação enquanto houver um `sock.makefile()` aberto sobre ela
+(nota 9 do `M3.md`).
 
 ---
 

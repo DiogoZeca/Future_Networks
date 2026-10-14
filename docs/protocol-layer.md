@@ -32,6 +32,11 @@ sem rede.
 Só os tipos do M1: `NICK`, `MSG` (C→S) e `OK`, `CHAT`, `ERROR` (S→C). Os
 restantes do slide 124 entram no M3; até lá são `unknown type`.
 
+> **Desde o M3** a camada tem todos os tipos do slide 124 (`EVENT` no M2;
+> `PRIV`, `LIST`, `QUIT`, `USERS` no M3), o primeiro array (`USERS.nicks`), um
+> campo opcional `to` no `CHAT`, e nicks sem `"` nem `\` (D20). O porquê de
+> cada mudança está em [`milestones/M3.md`](milestones/M3.md).
+
 ---
 
 ## 2. Decisões do contrato
@@ -53,6 +58,10 @@ esquecer**, e a struct pode viver na stack ou dentro da futura `struct conn`.
 
 - **Bytes, não caracteres.** `"olá"` são 4 bytes. Não se valida UTF-8 (D3).
 - **Nick sem espaços** porque no M3 o `/msg <nick> texto` parte por espaço.
+- **M3 (D20):** o nick também deixou de aceitar `"` e `\` — o pior `USERS`
+  (64 nicks) não cabia numa linha com eles. Nicks vindos de um *servidor*
+  (`CHAT.from`, `USERS`) continuam a aceitá-los: estrito a enviar, tolerante a
+  receber.
 - **Sem caracteres de controlo** (< 0x20 e 0x7F) — logo **sem mensagens de
   várias linhas**. Tem uma segunda razão, a da §2.3.
 

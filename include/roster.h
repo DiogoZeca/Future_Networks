@@ -80,6 +80,11 @@
  * um memcpy em vez de um passeio por ponteiros com o lock agarrado. */
 #define ROSTER_MAX 64
 
+/* Um USERS (M3) leva os nicks de todos: tem de caber no que o protocolo
+ * aceita enviar numa linha (protocol.h, D20). */
+_Static_assert(ROSTER_MAX <= PROTO_USERS_MAX,
+               "um USERS com toda a gente tem de caber numa linha");
+
 struct client {
     /* --- da thread dona; o broadcast só lê o fd --- */
     int  fd;                          /* -1 é válido (usado nos testes)       */
@@ -93,7 +98,8 @@ struct client {
     _Atomic int dead;
 
     /* --- protegidos por roster.lock --- */
-    char nick[PROTO_NICK_MAX + 1];    /* "" até o NICK ser aceite             */
+    char nick[PROTO_NICK_MAX + 1];    /* "" até o NICK ser aceite; reservado  */
+                                      /* pelo roster_claim() (M3)             */
     int  joined;                      /* 1 = está no chat (ver roster_join)   */
     int  refs;                        /* 0 => fechar o fd e libertar          */
     int  listed;                      /* 1 enquanto estiver em v[]            */
@@ -149,8 +155,43 @@ void roster_remove(struct roster *r, struct client *c);
  * thread chegava ao cliente antes do OK (ver o ciclo de saídas em
  * src/server/main.c).
  *
+ * Desde o M3 o nick já foi reservado antes, pelo roster_claim() (é aí que se
+ * garante que é único); o servidor passa aqui o MESMO nick. O join não volta
+ * a verificar nada: só torna o cliente visível.
+ *
  * Idempotente. */
 void roster_join(struct roster *r, struct client *c, const char *nick);
+
+/* ---- Nicks (M3) --------------------------------------------------------- */
+
+/* Reserva `nick` para o cliente c, SE mais ninguém na lista o tiver (D18:
+ * comparação proto_nick_eq, sem olhar a maiúsculas). Devolve 1 se reservou,
+ * 0 se já está em uso (-> ERROR 409).
+ *
+ * Verificar e reservar acontecem DENTRO do mesmo lock. Separados ("existe?" e
+ * depois "guarda"), dois clientes a pedir "ana" ao mesmo tempo passavam os
+ * dois na verificação antes de qualquer um guardar — e ficavam duas "ana".
+ * É o test_roster #18 (16 threads, o mesmo nick, 200 rondas).
+ *
+ * Conta como "em uso" quem já reservou e ainda não entrou no chat (está entre
+ * o NICK aceite e o roster_join): esse vai entrar a seguir. O nick fica livre
+ * quando o dono sai da lista (roster_remove). */
+int roster_claim(struct roster *r, struct client *c, const char *nick);
+
+/* Procura alguém NO CHAT (joined) com este nick (proto_nick_eq). Se existir,
+ * copia o nick tal como foi registado para canon (pode ser NULL) e devolve 1;
+ * senão 0. Não guarda referência nenhuma: no instante seguinte o cliente pode
+ * já ter saído — serve para decidir o 404, não para enviar. */
+int roster_lookup(struct roster *r, const char *nick, char canon[PROTO_NICK_MAX + 1]);
+
+/* Como roster_lookup(), mas devolve o cliente com +1 referência, para lhe
+ * enviar. O chamador TEM de chamar client_release(). NULL se não existir. */
+struct client *roster_find(struct roster *r, const char *nick);
+
+/* Copia para out[] os nicks de quem está NO CHAT (joined), pela ordem da
+ * lista (sem significado). Devolve quantos (no máximo cap). A ordem do USERS
+ * é decisão da session (D16), não daqui. */
+size_t roster_nicks(struct roster *r, char (*out)[PROTO_NICK_MAX + 1], size_t cap);
 
 /* Larga UMA referência. A zero: fecha o fd (se >= 0), destrói o wlock e liberta
  * a memória. Depois desta chamada o ponteiro pode já não ser válido. */

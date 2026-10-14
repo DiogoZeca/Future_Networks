@@ -1,7 +1,7 @@
 /*
- * M2 — cliente de chat, com DUAS threads.
+ * M3 — cliente de chat, com DUAS threads e os comandos do slide 123.
  *
- *   thread principal   teclado -> MSG -> socket
+ *   thread principal   teclado -> MSG / PRIV / LIST / QUIT -> socket
  *   thread de leitura  socket  -> mostrar no ecrã
  *
  * Do lado do socket usa o MESMO framing que o servidor: as respostas também
@@ -40,6 +40,18 @@
  *
  * É por isso que o servidor precisa de um wlock por cliente e o cliente não
  * precisa de nenhum: lá há N threads a escrever no mesmo socket, aqui há uma.
+ *
+ *
+ * O QUE MUDOU DO M2 PARA O M3
+ * ---------------------------
+ *   - Comandos: /list, /msg <nick> <texto>, /quit, /help (ui.c, testados à
+ *     unidade). Um comando desconhecido NÃO é enviado como texto: "/lsit"
+ *     ir para o chat inteiro por um erro de escrita era o pior resultado.
+ *   - Nick em uso (ERROR 409): em vez de sair, pede outro e tenta na mesma
+ *     ligação (D19) — o servidor deixa.
+ *   - Sair (/quit ou Ctrl+D) manda um QUIT antes de fechar. Contra um
+ *     servidor que não feche ao receber o QUIT, o shutdown(SHUT_WR) a seguir
+ *     garante na mesma o fim da ligação.
  *
  * Uso: ./bin/client <host> [porta] [nick]   (sem nick, é pedido ao arrancar)
  */
@@ -116,8 +128,8 @@ static void show_line(const char *line, size_t len, struct msg *m)
     char             text[PROTO_LINE_BUF];
 
     if (proto_parse(line, len, m, &err) != 0) {
-        /* Ex.: um servidor que já tem tipos do M3 (USERS, PRIV...). Mostrar
-         * em bruto em vez de rebentar ou esconder. */
+        /* Ex.: um servidor de outro grupo com uma extensão que não
+         * conhecemos. Mostrar em bruto em vez de rebentar ou esconder. */
         printf("[servidor mandou mensagem nao suportada (%s)] %.*s\n",
                err.reason, (int)len, line);
         return;
@@ -177,17 +189,23 @@ static void *reader_thread(void *arg)
 
 /* ---- Arranque ----------------------------------------------------------- */
 
-/* Lê o nick do teclado, se não veio na linha de comando. */
+/* Lê um nick do teclado (se não veio na linha de comando, ou depois de um
+ * 409) até ser válido pelas regras do protocolo. -1 = EOF. */
 static int ask_nick(char *nick, size_t cap)
 {
     char buf[128];
-    printf("nick: ");
-    fflush(stdout);
-    if (fgets(buf, sizeof buf, stdin) == NULL)
-        return -1;
-    buf[strcspn(buf, "\r\n")] = '\0';
-    snprintf(nick, cap, "%s", buf);
-    return 0;
+    for (;;) {
+        printf("nick: ");
+        fflush(stdout);
+        if (fgets(buf, sizeof buf, stdin) == NULL)
+            return -1;
+        buf[strcspn(buf, "\r\n")] = '\0';
+        if (proto_valid_nick(buf)) {
+            snprintf(nick, cap, "%s", buf);
+            return 0;
+        }
+        printf("[nao enviado] %s\n", UI_WHY_BADNICK);
+    }
 }
 
 /* Envia o NICK e espera a resposta, AINDA em pedido-resposta.
@@ -202,13 +220,18 @@ static int ask_nick(char *nick, size_t cap)
  * não fosse ERROR contava como OK, e essa linha desaparecia sem ser mostrada.
  * Cada leitura tem o timeout de REPLY_TIMEOUT_S.
  *
- * Devolve 0 se fomos aceites. */
-static int do_nick(int fd, const struct msg *nick)
+ * M3: um ERROR 409 (nick em uso) não é o fim — pede-se outro nick ao
+ * utilizador e volta-se a tentar na mesma ligação (D19). Qualquer outro
+ * ERROR continua a ser recusa.
+ *
+ * Devolve 0 se fomos aceites (com o nick final em *nick). */
+static int do_nick(int fd, struct msg *nick)
 {
     static char line[RX_LINE_BUF];
     size_t      len;
     struct msg  reply;
 
+again:
     if (send_msg(fd, nick) != 0)
         return -1;
 
@@ -229,6 +252,12 @@ static int do_nick(int fd, const struct msg *nick)
         show_line(line, len, &reply);       /* mostra e faz o parse */
         if (reply.type == MT_OK)
             return 0;
+        if (reply.type == MT_ERROR && reply.code == 409) {
+            printf("[client] o nick %s ja esta em uso; escolhe outro\n", nick->nick);
+            if (ask_nick(nick->nick, sizeof nick->nick) != 0)
+                return -1;
+            goto again;
+        }
         if (reply.type == MT_ERROR)         /* nick recusado: não continuar */
             return -1;
     }
@@ -278,7 +307,7 @@ int main(int argc, char *argv[])
     tv.tv_sec = 0;                          /* sem timeout a partir daqui */
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
 
-    printf("[client] ligado a %s:%s como %s (Ctrl+D para sair)\n",
+    printf("[client] ligado a %s:%s como %s (/help para os comandos, Ctrl+D para sair)\n",
            host, port, nick.nick);
 
     /* 2. A partir daqui os dois sentidos são independentes. */
@@ -288,9 +317,11 @@ int main(int argc, char *argv[])
         goto out;
     }
 
-    /* 3. Teclado -> MSG. Sem esperar resposta: ela aparece quando chegar,
-     *    pela mão da outra thread. */
-    char typed[PROTO_TEXT_MAX + 3];         /* texto + "\r\n" + '\0' */
+    /* 3. Teclado -> MSG/PRIV/LIST/QUIT. Sem esperar resposta: ela aparece
+     *    quando chegar, pela mão da outra thread. */
+    /* texto + "/msg " + nick + ' ' + "\r\n" + '\0' */
+    char typed[PROTO_TEXT_MAX + PROTO_NICK_MAX + 16];
+    int  sent_quit = 0;
     while (fgets(typed, sizeof typed, stdin) != NULL) {
         /* Linha maior do que o buffer: o fgets parte-a, e o resto viria como
          * se fosse a linha seguinte — o mesmo problema do framing, agora do
@@ -306,23 +337,42 @@ int main(int argc, char *argv[])
         struct msg  m;
         const char *why;
         int r = ui_input_to_msg(typed, &m, &why);
-        if (r == 0)
+        if (r == UI_NONE)
             continue;                       /* Enter sozinho */
-        if (r < 0) {
+        if (r == UI_HELP) {
+            printf("%s\n", UI_HELP_TEXT);
+            continue;
+        }
+        if (r == UI_BAD) {
             printf("[nao enviado] %s\n", why);
             continue;
         }
 
-        /* Sem eco local: o servidor devolve-nos o nosso CHAT (D5). Se o
-         * imprimíssemos também, aparecia duplicado. */
+        if (m.type == MT_QUIT) {
+            /* Antes de enviar: o fecho que o servidor faz a seguir ao OK já
+             * é o fim esperado, não uma queda. */
+            quitting = 1;
+            sent_quit = 1;
+            send_msg(fd, &m);
+            break;
+        }
+
+        /* Sem eco local: o servidor devolve-nos o nosso CHAT (D5) e a cópia
+         * de cada PRIV (D14). Se o imprimíssemos também, aparecia duplicado. */
         if (send_msg(fd, &m) != 0)
             break;
     }
 
-    /* 4. EOF no teclado: fechar só o sentido de envio (FIN). O servidor vê
-     *    recv()==0 e fecha também; a thread de leitura mostra o que ainda
-     *    chegar e depois termina sozinha ao ver o fecho. */
+    /* 4. Fim (/quit ou EOF no teclado). No EOF manda-se também o QUIT (D17):
+     *    o servidor responde OK e fecha. Depois, fechar o sentido de envio
+     *    (FIN): mesmo um servidor que ignore o QUIT vê recv()==0 e fecha. A
+     *    thread de leitura mostra o que ainda chegar e termina ao ver o
+     *    fecho. */
     quitting = 1;
+    if (!sent_quit) {
+        struct msg q = { .type = MT_QUIT };
+        send_msg(fd, &q);                   /* se falhar, o fecho chega na mesma */
+    }
     shutdown(fd, SHUT_WR);
     pthread_join(reader, NULL);
     status = EXIT_SUCCESS;

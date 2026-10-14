@@ -18,7 +18,24 @@ Formato:
   os campos escritos têm de existir com aquele valor, campos a mais são
   ignorados (`{"type":"ERROR","code":400}` passa com qualquer `reason`)
 - `# ` comentário
-- cada cenário corre numa ligação nova
+- cada cenário corre em ligações novas
+
+Desde o M3 (o 409 e o `PRIV` precisam de dois clientes):
+
+- `a>`, `b<`, ... — a letra diz **que ligação**. Cada uma abre na primeira vez
+  que aparece, pela ordem do cenário. Sem letra é a ligação por omissão.
+- `< CLOSED` — espera que o servidor feche essa ligação (`QUIT`).
+- Quando se espera algo que **não** é um `EVENT`, os `EVENT` que aparecerem
+  pelo caminho são saltados: quem recebe os avisos de entrada e saída é
+  semântica de cada grupo (D10) e não deve fazer falhar um cenário de `PRIV`.
+
+```
+# 07_nick_em_uso.txt (excerto)
+a> {"type":"NICK","nick":"ana"}
+a< {"type":"OK"}
+b> {"type":"NICK","nick":"ana"}
+b< {"type":"ERROR","code":409}
+```
 
 | Cenário | O que verifica |
 |---|---|
@@ -28,7 +45,14 @@ Formato:
 | `04_json_invalido` | não-JSON → `ERROR 400`; a ligação continua |
 | `05_campos_extra` | campos desconhecidos ignorados; `from` do cliente não conta |
 | `06_utf8_e_escapes` | UTF-8 partido entre `recv()` (no modo byte a byte) e escapes |
+| `07_nick_em_uso` | 409, também com outras maiúsculas (D18); depois do 409 entra com outro nick (D19) |
+| `08_priv` | o destino recebe o privado, o emissor a cópia (D14), um terceiro nada |
+| `09_priv_inexistente` | `PRIV` para quem não está → 404 (D15); a ligação continua |
+| `10_list` | `USERS` com quem pediu, ordenado, sem quem ainda não fez `NICK` (D16) |
+| `11_quit` | `QUIT` → `OK` + fecho; os outros veem `"rui left"` (D17) |
+| `12_m3_antes_de_nick` | `LIST`/`PRIV` antes do `NICK` → 401; `QUIT` → `OK` + fecho |
 
-Os cenários 01–03 dependem de D5/D6 e o 02 do código 401 — enquanto estiverem
-*TO AGREE* no `PROTOCOL.md`, uma falha contra outro grupo pode ser uma decisão
-diferente e não um bug.
+Os cenários 01–03 dependem de D5/D6 e o 02 do código 401; os 07–12 das
+decisões D13–D19 — enquanto estiverem *PROPOSTA* no `PROTOCOL.md`, uma falha
+contra outro grupo pode ser uma decisão diferente e não um bug. O
+[`docs/DECISIONS.md`](../../docs/DECISIONS.md) diz qual.

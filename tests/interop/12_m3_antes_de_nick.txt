@@ -1,0 +1,8 @@
+# Antes do NICK: PRIV e LIST -> 401, como o MSG. O QUIT funciona sempre (D17).
+> {"type":"LIST"}
+< {"type":"ERROR","code":401}
+> {"type":"PRIV","to":"rui","text":"cedo"}
+< {"type":"ERROR","code":401}
+> {"type":"QUIT"}
+< {"type":"OK"}
+< CLOSED
