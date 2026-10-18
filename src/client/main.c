@@ -27,19 +27,24 @@
  * outros dizem depois de falarmos não é um chat.
  *
  *
- * PORQUE É QUE NÃO HÁ LOCKS NENHUNS AQUI
- * --------------------------------------
+ * PORQUE É QUE HÁ SÓ UM LOCK AQUI (O DO ECRÃ)
+ * -------------------------------------------
  * Uma ligação TCP é full-duplex: os dois sentidos são independentes. Como cada
- * thread usa um sentido só — a principal escreve, a de leitura lê — nenhuma
- * estrutura é partilhada:
+ * thread usa um sentido só — a principal escreve, a de leitura lê — o socket
+ * não precisa de lock nenhum:
  *
  *   rx (rxbuf)   só a thread de leitura lhe toca, depois do arranque
  *   send_all()   só a thread principal o chama
- *   printf()     cada chamada é atómica na glibc; as linhas podem aparecer
- *                por ordens diferentes, mas nunca partidas a meio
  *
- * É por isso que o servidor precisa de um wlock por cliente e o cliente não
- * precisa de nenhum: lá há N threads a escrever no mesmo socket, aqui há uma.
+ * É por isso que o servidor precisa de um wlock por cliente e o cliente não:
+ * lá há N threads a escrever no mesmo socket, aqui há uma.
+ *
+ * O que as duas threads PARTILHAM é o ecrã: a principal desenha a linha que
+ * se está a escrever, a de leitura mostra o que chega. Até à correção do M3
+ * bastava que cada printf() fosse atómico; desde que o cliente desenha ele
+ * próprio a linha de escrita (term.h), mostrar uma mensagem é "apagar a linha,
+ * escrever, redesenhar", e isso tem de ser uma operação só. Por isso TUDO o
+ * que se mostra passa por term_out(), que tem o mutex do ecrã.
  *
  *
  * O QUE MUDOU DO M2 PARA O M3
@@ -65,11 +70,23 @@
  *     DESCARTADA com um aviso (rxbuf_init_lenient), em vez de fechar o
  *     cliente; texto de várias linhas é mostrado indentado e limpo (ui.c).
  *
+ * CORREÇÃO DO M3 (depois do teste cruzado)
+ * ----------------------------------------
+ *   - Num terminal, o cliente desenha ele próprio a linha de escrita, com o
+ *     nick à frente ("ana> ..."), em vez de deixar o terminal fazer o eco
+ *     (term.c, ui_line_* em ui.c). Uma mensagem que chega já não se mistura
+ *     com o que se está a escrever; o que se envia aparece uma vez só (a
+ *     linha de escrita é apagada no Enter e fica o CHAT do servidor); o
+ *     Enter sozinho não faz nada. Sem terminal (pipe) fica tudo como antes.
+ *   - O servidor manda boas-vindas a quem entra (D22): é um EVENT, e
+ *     mostra-se como os outros ("* welcome, ana! ...").
+ *
  * Uso: ./bin/client <host> [porta] [nick]   (sem nick, é pedido ao arrancar)
  */
 #include "framing.h"
 #include "net.h"
 #include "protocol.h"
+#include "term.h"
 #include "ui.h"
 
 #include <errno.h>
@@ -114,12 +131,12 @@ static int read_line(int fd, char *line, size_t *len)
         if (r == RX_LINE)
             return 1;
         if (r == RX_SKIPPED) {              /* modo tolerante: avisar e seguir */
-            fprintf(stderr, "[client] o servidor mandou uma linha com mais de %d "
-                            "bytes: descartada\n", RX_MAX_LINE);
+            term_out(stderr, "[client] o servidor mandou uma linha com mais de %d "
+                             "bytes: descartada", RX_MAX_LINE);
             continue;
         }
         if (r != RX_NEED) {                 /* RX_FAULT: bug nosso */
-            fprintf(stderr, "[client] BUG: rxbuf_next_line = %d\n", r);
+            term_out(stderr, "[client] BUG: rxbuf_next_line = %d", r);
             return -1;
         }
 
@@ -130,7 +147,7 @@ static int read_line(int fd, char *line, size_t *len)
             return -2;
         if (n < 0) {
             if (!quitting)
-                perror("recv");
+                term_out(stderr, "recv: %s", strerror(errno));
             return -1;
         }
         if (rxbuf_feed(&rx, chunk, (size_t)n) != 0)
@@ -151,18 +168,21 @@ static void show_line(const char *line, size_t len, struct msg *m)
         /* Ex.: um servidor de outro grupo com uma extensão que não
          * conhecemos. Mostrar em bruto em vez de rebentar ou esconder — mas
          * curto e sem caracteres de controlo (podiam mexer no terminal). */
-        printf("[servidor mandou mensagem nao suportada (%s)] ", err.reason);
-        for (size_t i = 0; i < len && i < 200; i++) {
-            unsigned char c = (unsigned char)line[i];
-            putchar(c < 0x20 || c == 0x7F ? '?' : c);
+        char   bruto[201];
+        size_t k = 0;
+        for (; k < len && k < 200; k++) {
+            unsigned char c = (unsigned char)line[k];
+            bruto[k] = (c < 0x20 || c == 0x7F) ? '?' : (char)c;
         }
-        printf("%s\n", len > 200 ? "..." : "");
+        bruto[k] = '\0';
+        term_out(stdout, "[servidor mandou mensagem nao suportada (%s)] %s%s",
+                 err.reason, bruto, len > 200 ? "..." : "");
         return;
     }
     if (m->type == MT_OK)
         return;
     ui_format(m, text, sizeof text);
-    printf("%s\n", text);
+    term_out(stdout, "%s", text);
 }
 
 /* Codifica e envia. -1 = sair. */
@@ -172,11 +192,11 @@ static int send_msg(int fd, const struct msg *m)
     size_t len;
 
     if (proto_encode(m, line, sizeof line, &len) != 0) {
-        fprintf(stderr, "[client] BUG: mensagem nao codificavel\n");
+        term_out(stderr, "[client] BUG: mensagem nao codificavel");
         return -1;
     }
     if (send_all(fd, line, len) < 0) {
-        perror("send");
+        term_out(stderr, "send: %s", strerror(errno));
         return -1;
     }
     return 0;
@@ -187,8 +207,9 @@ static int send_msg(int fd, const struct msg *m)
 /* Lê o socket até ao fim e mostra tudo o que chegar. Nunca escreve no socket.
  *
  * Se o servidor cair enquanto estamos à espera do teclado, a thread principal
- * está presa no fgets() e não há forma portável de a interromper — por isso
- * esta thread avisa e termina o processo. Quando somos NÓS a sair (Ctrl+D), o
+ * está presa no read() (ou no fgets()) do teclado e não há forma portável de
+ * a interromper — por isso esta thread avisa e termina o processo (o atexit
+ * repõe o terminal). Quando somos NÓS a sair (Ctrl+D), o
  * fecho é esperado: basta retornar e deixar o join acontecer. */
 static void *reader_thread(void *arg)
 {
@@ -209,8 +230,8 @@ static void *reader_thread(void *arg)
             return NULL;                     /* fim esperado: o join trata */
 
         if (r == -2)
-            fprintf(stderr, "\n[client] o servidor fechou a ligacao\n");
-        exit(r == -2 ? EXIT_SUCCESS : EXIT_FAILURE);
+            term_out(stderr, "[client] o servidor fechou a ligacao");
+        exit(r == -2 ? EXIT_SUCCESS : EXIT_FAILURE);   /* o atexit repõe o terminal */
     }
 }
 
@@ -231,7 +252,7 @@ static int ask_nick(char *nick, size_t cap)
             snprintf(nick, cap, "%s", buf);
             return 0;
         }
-        printf("[nao enviado] %s\n", UI_WHY_BADNICK);
+        term_out(stdout, "[nao enviado] %s", UI_WHY_BADNICK);
     }
 }
 
@@ -268,11 +289,11 @@ again:
     for (;;) {
         int r = read_line(fd, line, &len);
         if (r == 0) {
-            fprintf(stderr, "[client] sem resposta do servidor em %d s\n", REPLY_TIMEOUT_S);
+            term_out(stderr, "[client] sem resposta do servidor em %d s", REPLY_TIMEOUT_S);
             return -1;
         }
         if (r != 1) {
-            fprintf(stderr, "[client] o servidor fechou a ligacao\n");
+            term_out(stderr, "[client] o servidor fechou a ligacao");
             return -1;
         }
 
@@ -280,7 +301,7 @@ again:
         if (reply.type == MT_OK)
             return 0;
         if (reply.type == MT_ERROR && reply.code == 409) {
-            printf("[client] o nick %s ja esta em uso; escolhe outro\n", nick->nick);
+            term_out(stdout, "[client] o nick %s ja esta em uso; escolhe outro", nick->nick);
             if (ask_nick(nick->nick, sizeof nick->nick) != 0)
                 return -1;
             goto again;
@@ -336,30 +357,38 @@ int main(int argc, char *argv[])
     tv.tv_sec = 0;                          /* sem timeout a partir daqui */
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
 
-    printf("[client] ligado a %s:%s como %s (/help para os comandos, Ctrl+D para sair)\n",
-           host, port, nick.nick);
+    term_out(stdout, "[client] ligado a %s:%s como %s (/help para os comandos, Ctrl+D para sair)",
+             host, port, nick.nick);
 
-    /* 2. A partir daqui os dois sentidos são independentes. */
+    /* 2. Num terminal: desenhar nós a linha de escrita (term.h). Só agora,
+     *    com o nick final (pode ter mudado depois de um 409). */
+    term_start(nick.nick);
+
+    /* 3. A partir daqui os dois sentidos são independentes. A thread de
+     *    leitura nasce com os sinais do terminal bloqueados (herda a máscara):
+     *    assim chegam sempre à thread principal, que é a que está no read()
+     *    do teclado e sabe redesenhar. */
     pthread_t reader;
-    if (pthread_create(&reader, NULL, reader_thread, &fd) != 0) {
+    term_hold_signals();
+    int rc = pthread_create(&reader, NULL, reader_thread, &fd);
+    term_release_signals();
+    if (rc != 0) {
+        term_stop();
         fprintf(stderr, "[client] nao foi possivel criar a thread de leitura\n");
         goto out;
     }
 
-    /* 3. Teclado -> MSG/PRIV/LIST/QUIT. Sem esperar resposta: ela aparece
+    /* 4. Teclado -> MSG/PRIV/LIST/QUIT. Sem esperar resposta: ela aparece
      *    quando chegar, pela mão da outra thread. */
-    /* texto + "/msg " + nick + ' ' + "\r\n" + '\0' */
-    char typed[PROTO_TEXT_MAX + PROTO_NICK_MAX + 16];
+    /* "/msg " + nick + ' ' + texto + "\r\n" + '\0' */
+    char typed[UI_LINE_MAX + 3];
     int  sent_quit = 0;
-    while (fgets(typed, sizeof typed, stdin) != NULL) {
-        /* Linha maior do que o buffer: o fgets parte-a, e o resto viria como
-         * se fosse a linha seguinte — o mesmo problema do framing, agora do
-         * lado do teclado. Deitar fora até ao '\n' e avisar. */
-        if (strchr(typed, '\n') == NULL && !feof(stdin)) {
-            int c;
-            while ((c = getchar()) != '\n' && c != EOF)
-                ;
-            printf("[nao enviado] %s\n", UI_WHY_TOOLONG);
+    for (;;) {
+        int k = term_readline(typed, sizeof typed);
+        if (k == TERM_EOF || k == TERM_ERR)
+            break;
+        if (k == TERM_TOOLONG) {            /* só sem terminal */
+            term_out(stdout, "[nao enviado] %s", UI_WHY_TOOLONG);
             continue;
         }
 
@@ -367,13 +396,13 @@ int main(int argc, char *argv[])
         const char *why;
         int r = ui_input_to_msg(typed, &m, &why);
         if (r == UI_NONE)
-            continue;                       /* Enter sozinho */
+            continue;                       /* Enter sozinho (sem terminal) */
         if (r == UI_HELP) {
-            printf("%s\n", UI_HELP_TEXT);
+            term_out(stdout, "%s", UI_HELP_TEXT);
             continue;
         }
         if (r == UI_BAD) {
-            printf("[nao enviado] %s\n", why);
+            term_out(stdout, "[nao enviado] %s", why);
             continue;
         }
 
@@ -387,7 +416,9 @@ int main(int argc, char *argv[])
         }
 
         /* MSG: sem eco local, o servidor devolve-nos o nosso CHAT (D5) — se o
-         * imprimíssemos também, aparecia duplicado. */
+         * imprimíssemos também, aparecia duplicado. E num terminal a linha
+         * escrita já foi apagada no Enter (term_readline): o que fica no ecrã
+         * é só esse CHAT. */
         if (send_msg(fd, &m) != 0)
             break;
 
@@ -404,7 +435,7 @@ int main(int argc, char *argv[])
             memcpy(echo.to,   m.to,      sizeof echo.to);
             memcpy(echo.text, m.text,    sizeof echo.text);
             ui_format(&echo, shown, sizeof shown);
-            printf("%s\n", shown);
+            term_out(stdout, "%s", shown);
         }
     }
 
@@ -414,6 +445,9 @@ int main(int argc, char *argv[])
      *    thread de leitura mostra o que ainda chegar e termina ao ver o
      *    fecho. */
     quitting = 1;
+    /* O terminal volta ao normal JÁ: o que ainda chegar até o servidor fechar
+     * aparece sem prompt (já não se está a escrever nada). */
+    term_stop();
     if (!sent_quit) {
         struct msg q = { .type = MT_QUIT };
         send_msg(fd, &q);                   /* se falhar, o fecho chega na mesma */

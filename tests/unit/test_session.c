@@ -238,16 +238,16 @@ static void caso_39_sessao_completa(void)
 
 /* ---- M2: destinos e EVENT ----------------------------------------------- */
 
-/* 48. Um NICK aceite produz DUAS saidas, com destinos diferentes.
+/* 48. Um NICK aceite produz TRES saidas, com destinos diferentes.
  *
  *     A ordem importa: o OK vai primeiro, para que quem entra saiba que foi
  *     aceite antes de comecar a receber trafego dos outros. */
 static void caso_48_nick_gera_ok_e_event(void)
 {
-    CASE(48, "NICK -> 2 saidas");
+    CASE(48, "NICK -> 3 saidas (a 3.a e o EVENT de boas-vindas, D22: caso 88)");
     start(&s);
     CHECK_STR(send_line("{\"type\":\"NICK\",\"nick\":\"ana\"}"), OK_LINE);
-    CHECK_INT(n_outs, 2);
+    CHECK_INT(n_outs, 3);
 
     CASE(48, "a 1.a e o OK, so para quem entrou");
     CHECK_INT(outs[0].dest, SESS_SELF);
@@ -331,8 +331,9 @@ static void caso_52_nick_no_limite(void)
     char line[128];
     snprintf(line, sizeof line, "{\"type\":\"NICK\",\"nick\":\"%s\"}", n32);
     send_line(line);
-    CHECK_INT(n_outs, 2);
+    CHECK_INT(n_outs, 3);
     CHECK_INT(proto_encode(&outs[1].msg, wire, sizeof wire, NULL), 0);
+    CHECK_INT(proto_encode(&outs[2].msg, wire, sizeof wire, NULL), 0);   /* D22 */
 
     CASE(52, "e o de saida tambem");
     struct msg m;
@@ -565,6 +566,44 @@ static void caso_83_ok_antes_do_chat(void)
     CHECK_INT(s.state, SESS_READY);
 }
 
+/* ---- Correcao do M3 (depois do teste cruzado) --------------------------- */
+
+/* 88. D22: o "/help do lado do servidor". Um NICK aceite da tambem um EVENT
+ *     de boas-vindas, SO para quem entrou, com os comandos. */
+static void caso_88_boas_vindas(void)
+{
+    CASE(88, "NICK aceite -> a 3.a saida e o EVENT de boas-vindas, para o proprio");
+    start(&s);
+    send_line(NICK_ANA);
+    CHECK_INT(n_outs, 3);
+    CHECK_INT(outs[2].dest, SESS_SELF);
+    CHECK_INT(outs[2].msg.type, MT_EVENT);
+    CHECK_STR(wire_of(2), "{\"type\":\"EVENT\",\"text\":\"welcome, ana! commands: "
+                          "/list, /msg <nick> <text>, /quit\"}\n");
+
+    CASE(88, "a ordem nao mudou: OK (SELF) e \"joined\" (OTHERS) continuam a 1.a e a 2.a");
+    CHECK(outs[0].dest == SESS_SELF && outs[0].msg.type == MT_OK);
+    CHECK(outs[1].dest == SESS_OTHERS && outs[1].msg.type == MT_EVENT);
+
+    CASE(88, "o nick vai como foi registado (maiusculas incluidas)");
+    start(&s);
+    send_line("{\"type\":\"NICK\",\"nick\":\"Rui\"}");
+    CHECK_STR(wire_of(2), "{\"type\":\"EVENT\",\"text\":\"welcome, Rui! commands: "
+                          "/list, /msg <nick> <text>, /quit\"}\n");
+
+    CASE(88, "um NICK recusado (409) nao da boas-vindas: so o ERROR");
+    start(&s);
+    fake_add("ana");
+    send_line(NICK_ANA);
+    CHECK(n_outs == 1 && outs[0].msg.type == MT_ERROR && outs[0].msg.code == 409);
+
+    CASE(88, "com cap 2 a session devolve so as 2 primeiras (nunca escreve alem de cap)");
+    start(&s);
+    struct sess_out two[2];
+    CHECK_INT(session_handle(&s, NICK_ANA, strlen(NICK_ANA), two, 2), 2);
+    CHECK(two[0].msg.type == MT_OK && two[1].dest == SESS_OTHERS);
+}
+
 /* ------------------------------------------------------------------------ */
 
 int main(void)
@@ -591,5 +630,6 @@ int main(void)
     caso_69_quit();
     caso_70_users_do_cliente();
     caso_83_ok_antes_do_chat();
+    caso_88_boas_vindas();
     return t_report("session");
 }

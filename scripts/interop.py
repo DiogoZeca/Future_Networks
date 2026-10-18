@@ -31,6 +31,10 @@ Duas regras extra (M3):
   - A espera de um tipo que NAO seja EVENT salta os EVENT que aparecerem
     pelo caminho. Quem recebe os "x joined"/"x left" e semantica de cada
     grupo (D10): um cenario de PRIV nao deve falhar por causa disso.
+  - (Correcao do M3) A espera de um EVENT salta tambem os EVENT com OUTRO
+    texto: as boas-vindas a quem entra (D22, nossas) ou outros avisos que um
+    grupo decida mandar. Se o EVENT esperado nunca chegar, o erro mostra os
+    que foram saltados.
 
 Devolve 0 se tudo passou, 1 caso contrario.
 """
@@ -105,11 +109,14 @@ def send(sock, lines, mode):
 
 def expect(reader, want, who):
     """Le ate a resposta esperada. Devolve None se bateu certo, ou o erro."""
+    skipped = []                                # EVENTs saltados (para o erro)
     while True:
         try:
             got_raw = reader.readline()
         except (socket.timeout, OSError) as e:
-            return f"{who}esperava {json.dumps(want, ensure_ascii=False)}\n        recebeu: ({e})"
+            extra = "".join(f"\n        (saltado: {x})" for x in skipped)
+            return (f"{who}esperava {json.dumps(want, ensure_ascii=False)}\n"
+                    f"        recebeu: ({e}){extra}")
         if want == CLOSED:
             if got_raw is None:
                 return None
@@ -127,6 +134,12 @@ def expect(reader, want, who):
             continue
         missing = {k: v for k, v in want.items()
                    if not isinstance(got, dict) or got.get(k, object()) != v}
+        # Esperava-se um EVENT e chegou um EVENT com outro texto (as
+        # boas-vindas, D22, ou um aviso de outro grupo): saltar tambem.
+        if (missing and isinstance(got, dict) and got.get("type") == "EVENT"
+                and want.get("type") == "EVENT"):
+            skipped.append(got_raw)
+            continue
         if missing:
             return (f"{who}esperava {json.dumps(want, ensure_ascii=False)}\n"
                     f"        recebeu {got_raw}")

@@ -4,7 +4,8 @@
  * Numeração: 40-47, a seguir aos da session (M1/M2); 71-75 com os comandos
  * e o USERS (M3); 84 da revisão do M3 (mostrar várias linhas sem deixar um
  * '\033' mexer no terminal, e o que o protocolo cortou). O 43 mudou: o tab
- * passou a ser texto válido.
+ * passou a ser texto válido. 85-87 da correção do M3: o editor de linha
+ * (ui_line_*), tecla a tecla, sem terminal.
  */
 #include "ui.h"
 #include "test_util.h"
@@ -345,6 +346,167 @@ static void caso_84_mostrar_em_seguranca(void)
     CHECK_STR(shown, "<ana -> rui> (privado) ola\n    rui");
 }
 
+/* ---- Correcao do M3: o editor de linha --------------------------------- */
+
+static struct ui_line ln;
+
+/* Passa uma sequencia de bytes pelo editor; devolve o resultado da ULTIMA. */
+static int keys(const char *k)
+{
+    int r = UI_KEY_NONE;
+    for (; *k != '\0'; k++)
+        r = ui_line_key(&ln, (unsigned char)*k);
+    return r;
+}
+
+/* 85. As teclas que mexem na linha. */
+static void caso_85_editor_teclas(void)
+{
+    CASE(85, "texto acrescenta e pede para redesenhar");
+    ui_line_init(&ln);
+    CHECK_INT(keys("ola"), UI_KEY_REDRAW);
+    CHECK_STR(ln.buf, "ola");
+    CHECK_INT(ln.len, 3);
+
+    CASE(85, "Enter com texto -> SUBMIT, com a linha intacta (o chamador limpa)");
+    CHECK_INT(keys("\n"), UI_KEY_SUBMIT);
+    CHECK_STR(ln.buf, "ola");
+    CHECK_INT(keys("\r"), UI_KEY_SUBMIT);     /* sem ICRNL o Enter e '\r' */
+
+    CASE(85, "Enter com a linha vazia -> NADA (o 'spam de Enters' ja nao sobe o ecra)");
+    ui_line_init(&ln);
+    CHECK_INT(keys("\n"), UI_KEY_NONE);
+    CHECK_INT(keys("\n\n\n\r\r"), UI_KEY_NONE);
+    CHECK_INT(ln.len, 0);
+
+    CASE(85, "Backspace apaga um CARACTER: os 2 bytes de um 'e' com acento");
+    ui_line_init(&ln);
+    keys("ol\xC3\xA9");                        /* "olé" = 4 bytes */
+    CHECK_INT(ln.len, 4);
+    CHECK_INT(keys("\x7f"), UI_KEY_REDRAW);
+    CHECK_STR(ln.buf, "ol");
+    keys("\xE2\x82\xAC");                      /* "€" = 3 bytes */
+    keys("\x08");                               /* ^H tambem e Backspace */
+    CHECK_STR(ln.buf, "ol");
+
+    CASE(85, "um caracter UTF-8 so pede para redesenhar quando chega inteiro");
+    ui_line_init(&ln);
+    keys("a");
+    CHECK_INT(ui_line_key(&ln, 0xE2), UI_KEY_NONE);    /* "€", 1.o de 3 bytes */
+    CHECK_INT(ui_line_shown(&ln), 1);                 /* meio caracter nao se mostra */
+    CHECK_INT(ui_line_key(&ln, 0x82), UI_KEY_NONE);
+    CHECK_INT(ui_line_key(&ln, 0xAC), UI_KEY_REDRAW);
+    CHECK_STR(ln.buf, "a\xE2\x82\xAC");
+    CHECK_INT(ui_line_shown(&ln), 4);
+
+    CASE(85, "um caracter que fica a meio sai inteiro; bytes soltos sao ignorados");
+    ui_line_init(&ln);
+    keys("a\xC3" "b");                          /* 0xC3 sem continuacao */
+    CHECK_STR(ln.buf, "ab");
+    keys("\xA9\x80\xFF");                       /* soltos e 0xFF: nunca UTF-8 */
+    CHECK_STR(ln.buf, "ab");
+    keys("\xC3\x7f");                           /* Backspace a meio: so o meio */
+    CHECK_STR(ln.buf, "ab");
+    keys("\xC3\n");                             /* Enter a meio: envia sem ele */
+    CHECK_STR(ln.buf, "ab");
+
+    CASE(85, "Backspace com a linha vazia nao faz nada");
+    ui_line_init(&ln);
+    CHECK_INT(keys("\x7f"), UI_KEY_NONE);
+
+    CASE(85, "Ctrl+U apaga a linha; Ctrl+W a ultima palavra");
+    ui_line_init(&ln);
+    keys("/msg rui ola  ");
+    CHECK_INT(keys("\x17"), UI_KEY_REDRAW);
+    CHECK_STR(ln.buf, "/msg rui ");
+    CHECK_INT(keys("\x15"), UI_KEY_REDRAW);
+    CHECK_STR(ln.buf, "");
+    CHECK_INT(keys("\x15"), UI_KEY_NONE);
+
+    CASE(85, "Ctrl+D: com a linha vazia sai; com texto e ignorado");
+    ui_line_init(&ln);
+    CHECK_INT(keys("\x04"), UI_KEY_EOF);
+    keys("a");
+    CHECK_INT(keys("\x04"), UI_KEY_NONE);
+    CHECK_STR(ln.buf, "a");
+
+    CASE(85, "Tab e outros controlos sao ignorados (o texto nao muda)");
+    CHECK_INT(keys("\t\x01\x02\x7"), UI_KEY_NONE);
+    CHECK_STR(ln.buf, "a");
+}
+
+/* 86. Sequencias de escape: as teclas que mandam varios bytes (setas, Home,
+ *     Delete, F1...) sao engolidas INTEIRAS, sem deixar "[A" na linha. */
+static void caso_86_editor_escapes(void)
+{
+    CASE(86, "setas (ESC [ A..D) e ESC O x");
+    ui_line_init(&ln);
+    keys("a\033[Ab\033[Dc\033OAd");
+    CHECK_STR(ln.buf, "abcd");
+
+    CASE(86, "com parametros: Delete (ESC [ 3 ~), Ctrl+seta (ESC [ 1 ; 5 C)");
+    ui_line_init(&ln);
+    keys("x\033[3~y\033[1;5Cz");
+    CHECK_STR(ln.buf, "xyz");
+
+    CASE(86, "Alt+tecla (ESC x): a tecla e engolida");
+    ui_line_init(&ln);
+    keys("1\033f2");
+    CHECK_STR(ln.buf, "12");
+
+    CASE(86, "o byte final da sequencia nao entra na linha; o Enter a seguir envia");
+    ui_line_init(&ln);
+    keys("q\033[");
+    CHECK_INT(ui_line_key(&ln, 'B'), UI_KEY_NONE);   /* fim da sequencia */
+    CHECK_INT(ui_line_key(&ln, '\n'), UI_KEY_SUBMIT);
+    CHECK_STR(ln.buf, "q");
+}
+
+/* 87. Limites: a linha nunca passa de UI_LINE_MAX, e um caracter UTF-8 entra
+ *     inteiro ou nao entra. E o fim da linha que se mostra quando nao cabe. */
+static void caso_87_editor_limites(void)
+{
+    CASE(87, "cheia: o byte seguinte da FULL e a linha nao muda");
+    ui_line_init(&ln);
+    for (size_t i = 0; i < UI_LINE_MAX; i++)
+        ui_line_key(&ln, 'x');
+    CHECK_INT(ln.len, UI_LINE_MAX);
+    CHECK_INT(ui_line_key(&ln, 'y'), UI_KEY_FULL);
+    CHECK_INT(ln.len, UI_LINE_MAX);
+    CHECK_INT(ln.buf[UI_LINE_MAX], '\0');
+
+    CASE(87, "com 1 byte livre, um 'e' (2 bytes) nao entra — nem o 1.o byte, nem o 2.o");
+    keys("\x7f");                               /* fica 1 livre */
+    CHECK_INT(ui_line_key(&ln, 0xC3), UI_KEY_FULL);
+    CHECK_INT(ui_line_key(&ln, 0xA9), UI_KEY_NONE); /* a continuacao e deitada fora */
+    CHECK_INT(ln.len, UI_LINE_MAX - 1);
+    CHECK_INT(ui_line_key(&ln, 'z'), UI_KEY_REDRAW); /* um ASCII ainda cabe */
+    CHECK_INT(ln.len, UI_LINE_MAX);
+
+    CASE(87, "a linha mais longa que o editor deixa escrever da um /msg valido");
+    ui_line_init(&ln);
+    keys("/msg 12345678901234567890123456789012 ");
+    while (ln.len < UI_LINE_MAX)
+        ui_line_key(&ln, 'x');
+    CHECK_INT(ui_input_to_msg(ln.buf, &m, &why), UI_SEND);
+    CHECK_INT(strlen(m.text), PROTO_TEXT_MAX);
+
+    CASE(87, "tail: cabe tudo -> 0; nao cabe -> os ultimos cols caracteres");
+    ui_line_init(&ln);
+    keys("abcdef");
+    CHECK_INT(ui_line_tail(&ln, 10), 0);
+    CHECK_INT(ui_line_tail(&ln, 6), 0);
+    CHECK_INT(ui_line_tail(&ln, 4), 2);         /* "cdef" */
+    CHECK_INT(ui_line_tail(&ln, 0), 6);
+
+    CASE(87, "tail conta caracteres, nao bytes, e nunca corta um a meio");
+    ui_line_init(&ln);
+    keys("a\xC3\xA9\xC3\xA9");                 /* "aéé" = 5 bytes, 3 caracteres */
+    CHECK_INT(ui_line_tail(&ln, 3), 0);
+    CHECK_INT(ui_line_tail(&ln, 2), 1);         /* "éé" */
+    CHECK_INT(ui_line_tail(&ln, 1), 3);         /* "é" */
+}
+
 int main(void)
 {
     caso_40_linha_normal();
@@ -361,5 +523,8 @@ int main(void)
     caso_74_privado();
     caso_75_users();
     caso_84_mostrar_em_seguranca();
+    caso_85_editor_teclas();
+    caso_86_editor_escapes();
+    caso_87_editor_limites();
     return t_report("ui");
 }

@@ -25,7 +25,7 @@ Notas de cada fase em [`docs/milestones/`](docs/milestones/).
 ## Estrutura
 
 ```
-include/         headers (net.h, framing.h, protocol.h, session.h, roster.h, ui.h)
+include/         headers (net.h, framing.h, protocol.h, session.h, roster.h, ui.h, term.h)
 src/common/      código usado por cliente e servidor
   net.c            sockets: criar, ligar, send_all, send_all_timeout (prazo total)
   framing.c        bytes <-> linhas (buffer de receção, split em '\n')
@@ -35,7 +35,8 @@ src/server/      servidor
   roster.c         lista de clientes partilhada: lock, refcount, nicks únicos
   main.c           uma thread por cliente; broadcast e PRIV com prazo de envio
 src/client/      cliente
-  ui.c             texto e comandos (/list, /msg, /quit) <-> mensagens (testada à unidade)
+  ui.c             texto e comandos (/list, /msg, /quit) <-> mensagens; editor de linha (testada à unidade)
+  term.c           o terminal: linha de escrita com o nick à frente, sem se misturar com o que chega
   main.c           duas threads: teclado -> socket e socket -> ecrã
 tests/unit/      testes framing / net / protocol / roster / session / ui (make test)
 tests/interop/   cenários em texto, independentes da linguagem (1 ou várias ligações)
@@ -63,7 +64,9 @@ e `python3 scripts/probe_m3.py`.
 
 No cliente: qualquer linha vai para toda a gente; `/list` mostra quem está,
 `/msg <nick> <texto>` manda uma mensagem privada, `/quit` (ou Ctrl+D) sai e
-`/help` mostra os comandos.
+`/help` mostra os comandos. Escreve-se à frente do nick (`ana> `): o que chega
+dos outros aparece por cima, sem se misturar com o que se está a escrever.
+Backspace, Ctrl+U (apagar a linha) e Ctrl+W (apagar a palavra) funcionam.
 
 Cada fase tem em `docs/milestones/` uma tabela "O que os slides pedem" com a
 resposta a cada ponto dos slides 123–125, onde está no código e como se prova.

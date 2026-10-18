@@ -204,3 +204,174 @@ void ui_format(const struct msg *m, char *out, size_t cap)
     if (m->truncated && pos + 1 < cap)
         put_fmt_len(cap - pos, snprintf(out + pos, cap - pos, " [...]"));
 }
+
+/* ---- Editor de linha (correção do M3) ----------------------------------- */
+
+/* Byte de continuação UTF-8 (10xxxxxx): o meio de um carácter. */
+static int is_cont(unsigned char c)
+{
+    return (c & 0xC0) == 0x80;
+}
+
+/* Quantos bytes tem o carácter que começa com `c` (1 para ASCII e para um
+ * byte inválido: o servidor recusa UTF-8 inválido, mas o editor não tem de
+ * adivinhar o que a pessoa queria). */
+static int utf8_need(unsigned char c)
+{
+    if (c >= 0xC0 && c <= 0xDF) return 2;
+    if (c >= 0xE0 && c <= 0xEF) return 3;
+    if (c >= 0xF0 && c <= 0xF7) return 4;
+    return 1;
+}
+
+/* Apaga o último carácter inteiro (os bytes de continuação e o que os começa). */
+static void erase_char(struct ui_line *l)
+{
+    l->want = 0;                                /* um carácter a meio sai inteiro */
+    l->part = 0;
+    while (l->len > 0 && is_cont((unsigned char)l->buf[l->len - 1]))
+        l->len--;
+    if (l->len > 0)
+        l->len--;
+    l->buf[l->len] = '\0';
+}
+
+void ui_line_init(struct ui_line *l)
+{
+    memset(l, 0, sizeof *l);
+}
+
+/* Deita fora um carácter UTF-8 que ficou a meio (chegou o 1.º byte e não
+ * chegaram os outros). */
+static void drop_partial(struct ui_line *l)
+{
+    if (l->part > 0) {
+        l->len -= (size_t)l->part;
+        l->buf[l->len] = '\0';
+    }
+    l->part = 0;
+    l->want = 0;
+}
+
+int ui_line_key(struct ui_line *l, unsigned char c)
+{
+    /* 1. A meio de uma sequência de escape (setas, Delete, F1...): engolir
+     *    até ao fim dela. "ESC [" e "ESC O" acabam num byte 0x40-0x7E; o
+     *    que vem entre eles (0x20-0x3F) são parâmetros. Sem isto, uma seta
+     *    para cima escrevia "[A" na linha. */
+    if (l->esc == 1) {
+        l->esc = (c == '[' || c == 'O') ? 2 : 0;   /* Alt+tecla: engolir a tecla */
+        return UI_KEY_NONE;
+    }
+    if (l->esc == 2) {
+        if (c >= 0x40 && c <= 0x7E)
+            l->esc = 0;
+        return UI_KEY_NONE;
+    }
+
+    /* 2. Um carácter UTF-8 chega byte a byte. Os de continuação completam o
+     *    que está a meio (e só quando fica completo é que vale a pena
+     *    redesenhar: meio carácter no ecrã é lixo). Um de continuação sem
+     *    nada a meio é deitado fora — a linha fica sempre UTF-8 válido. */
+    if (is_cont(c)) {
+        if (l->drop > 0) {                      /* resto de um que não coube */
+            l->drop--;
+            return UI_KEY_NONE;
+        }
+        if (l->want == 0)                       /* solto: ignorar */
+            return UI_KEY_NONE;
+        l->buf[l->len++] = (char)c;             /* coube: reservado no 1.º byte */
+        l->buf[l->len]   = '\0';
+        l->part++;
+        if (--l->want > 0)
+            return UI_KEY_NONE;
+        l->part = 0;                            /* completo */
+        return UI_KEY_REDRAW;
+    }
+    l->drop = 0;
+    int dropped = 0;
+    if (l->want > 0) {                          /* o anterior ficou a meio */
+        drop_partial(l);
+        dropped = 1;
+    }
+
+    switch (c) {
+    case 0x1B:                                  /* ESC */
+        l->esc = 1;
+        return UI_KEY_NONE;
+    case '\r':
+    case '\n':                                  /* Enter */
+        /* Linha vazia: não enviar E não mudar de linha (era o "spam de
+         * Enters": cada um fazia subir o ecrã). */
+        return l->len == 0 ? UI_KEY_NONE : UI_KEY_SUBMIT;
+    case 0x7F:
+    case 0x08:                                  /* Backspace */
+        if (dropped)                            /* já apagou o que estava a meio */
+            return UI_KEY_NONE;
+        if (l->len == 0)
+            return UI_KEY_NONE;
+        erase_char(l);
+        return UI_KEY_REDRAW;
+    case 0x15:                                  /* Ctrl+U: apagar a linha */
+        if (l->len == 0)
+            return UI_KEY_NONE;
+        l->len    = 0;
+        l->buf[0] = '\0';
+        return UI_KEY_REDRAW;
+    case 0x17:                                  /* Ctrl+W: apagar a palavra */
+        if (l->len == 0)
+            return UI_KEY_NONE;
+        while (l->len > 0 && l->buf[l->len - 1] == ' ')
+            l->len--;
+        while (l->len > 0 && l->buf[l->len - 1] != ' ')
+            l->len--;
+        l->buf[l->len] = '\0';
+        return UI_KEY_REDRAW;
+    case 0x0C:                                  /* Ctrl+L */
+        return UI_KEY_REDRAW;
+    case 0x04:                                  /* Ctrl+D */
+        return l->len == 0 ? UI_KEY_EOF : UI_KEY_NONE;
+    default:
+        break;
+    }
+
+    if (c < 0x20 || c >= 0xF8)                  /* Tab, controlos, bytes que
+                                                   nunca são UTF-8 */
+        return UI_KEY_NONE;
+
+    /* 3. O 1.º byte de um carácter. Ou cabe INTEIRO, ou não entra nenhum
+     *    byte dele: com o limite a meio de um "é", ficava só o 1.º byte e a
+     *    linha deixava de ser UTF-8 válido (o servidor responderia 400). */
+    int need = utf8_need(c);
+    if (l->len + (size_t)need > UI_LINE_MAX) {
+        l->drop = need - 1;
+        return UI_KEY_FULL;
+    }
+    l->buf[l->len++] = (char)c;
+    l->buf[l->len]   = '\0';
+    if (need > 1) {
+        l->want = need - 1;
+        l->part = 1;
+        return UI_KEY_NONE;                     /* redesenhar quando completo */
+    }
+    return UI_KEY_REDRAW;
+}
+
+size_t ui_line_tail(const struct ui_line *l, size_t cols)
+{
+    size_t end = ui_line_shown(l);
+    if (cols == 0)
+        return end;
+    size_t n = 0;
+    for (size_t pos = end; pos > 0; ) {
+        pos--;
+        if (!is_cont((unsigned char)l->buf[pos]) && ++n == cols)
+            return pos;                         /* este carácter ainda cabe */
+    }
+    return 0;                                   /* cabe tudo */
+}
+
+size_t ui_line_shown(const struct ui_line *l)
+{
+    return l->len - (size_t)l->part;
+}

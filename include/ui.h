@@ -79,4 +79,66 @@ int ui_input_to_msg(const char *typed, struct msg *out, const char **why);
  * em " [...]". */
 void ui_format(const struct msg *m, char *out, size_t cap);
 
+/* ---- Editor de linha (correção do M3) -----------------------------------
+ *
+ * Até aqui era o TERMINAL que mostrava o que se escrevia (modo canónico): o
+ * programa não sabia o que estava no ecrã, e daí três problemas vistos no
+ * teste cruzado — uma mensagem que chegasse a meio da escrita ficava colada
+ * ao que se estava a escrever; o que se enviava aparecia duas vezes (o eco do
+ * terminal e o CHAT do servidor); e cada Enter sozinho fazia subir o ecrã.
+ *
+ * Agora, com stdin num terminal, o cliente lê tecla a tecla (term.c) e guarda
+ * ele próprio a linha numa `struct ui_line`. A parte que decide o que cada
+ * tecla faz está aqui, pura, para se testar sem terminal (test_ui.c #85-#87).
+ *
+ * Teclas:
+ *   texto (UTF-8 incluído)  acrescenta (um carácter UTF-8 só aparece quando
+ *                           chegaram todos os seus bytes; bytes soltos saem)
+ *   Backspace (DEL ou ^H)   apaga um CARÁCTER (todos os bytes de um "é")
+ *   Ctrl+U                  apaga a linha toda
+ *   Ctrl+W                  apaga a última palavra
+ *   Ctrl+L                  volta a desenhar
+ *   Enter                   com texto: enviar; com a linha vazia: NADA
+ *   Ctrl+D                  com a linha vazia: sair (como o EOF de antes)
+ *   ESC [ ... / ESC O x     (setas, Home, Delete, F1...) ignoradas inteiras
+ *   outro controlo, Tab     ignorados
+ */
+
+/* "/msg " + nick + ' ' + texto: a linha mais longa que pode dar uma mensagem
+ * válida. Mais do que isto nunca seria aceite, por isso não se deixa
+ * escrever (UI_KEY_FULL). */
+#define UI_LINE_MAX (PROTO_TEXT_MAX + PROTO_NICK_MAX + 6)
+
+struct ui_line {
+    char   buf[UI_LINE_MAX + 1];   /* sempre NUL-terminado */
+    size_t len;                    /* bytes em buf */
+    int    esc;                    /* 0 normal, 1 depois de ESC, 2 numa sequência */
+    int    drop;                   /* bytes de continuação a deitar fora (um
+                                      carácter UTF-8 que já não coube) */
+    int    want;                   /* bytes que faltam ao carácter a meio */
+    int    part;                   /* bytes que ele já tem no fim de buf */
+};
+
+void ui_line_init(struct ui_line *l);
+
+/* Trata UM byte vindo do teclado. Devolve o que o chamador tem de fazer: */
+#define UI_KEY_NONE   0   /* nada mudou no ecrã                              */
+#define UI_KEY_REDRAW 1   /* a linha mudou: voltar a desenhá-la              */
+#define UI_KEY_SUBMIT 2   /* Enter com texto: l->buf é a linha; o chamador
+                             trata-a e faz ui_line_init()                    */
+#define UI_KEY_EOF    3   /* Ctrl+D com a linha vazia: sair                  */
+#define UI_KEY_FULL   4   /* não coube (a linha fica igual): avisar          */
+int ui_line_key(struct ui_line *l, unsigned char c);
+
+/* Onde começa (em bytes) a parte da linha que cabe em `cols` colunas — o fim
+ * da linha, que é onde se está a escrever. Conta um carácter por coluna (os
+ * caracteres "largos", como emojis, ficam desalinhados: limitação aceite) e
+ * nunca corta um carácter UTF-8 a meio. cols == 0 → nada cabe. */
+size_t ui_line_tail(const struct ui_line *l, size_t cols);
+
+/* Até onde (em bytes) a linha se pode mostrar: sem o carácter UTF-8 que está
+ * a meio de chegar (meio carácter no ecrã é lixo). O ecrã mostra
+ * buf[ui_line_tail(l, cols) .. ui_line_shown(l)). */
+size_t ui_line_shown(const struct ui_line *l);
+
 #endif /* UI_H */

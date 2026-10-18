@@ -4,7 +4,7 @@ What **has to be agreed** with the other groups so that our client works with
 their servers and our server works with their clients — what is already
 agreed, and what does **not** need agreeing because the slides decide it.
 
-- The specification is in [`PROTOCOL.md`](PROTOCOL.md) (v0.6). This file says
+- The specification is in [`PROTOCOL.md`](PROTOCOL.md) (v0.7). This file says
   **what to ask**, what was agreed with whom, and what happens if two groups
   decide differently.
 - Every row has **our position**, implemented and tested. Each decision lives
@@ -118,6 +118,7 @@ everywhere, and makes our conformance scenarios pass against other servers.
 | B11 | Server full | `ERROR 503 "server full"`, then close; the limit is each group's choice (ours: 64) | OPEN | a close with no explanation | `server/main.c` (D12) |
 | B12 | Empty `text` in `MSG`/`PRIV` | **refused** (`400 "invalid field"`) | **differs from g1** (they accept it) — kept | an empty message from their client gets a 400 from our server; an empty `CHAT` from their server is shown by our client | `get_request_text()` |
 | B13 | Second `NICK` | `ERROR 400` (`"nick already set"`; g1 says `"already registered"`) | **AGREED (g1)** (code) | only the reason text differs | `session.c` |
+| B14 | Help for whoever joins (the "`/help` on the server side" from the cross-test) | right after the `OK` to `NICK`, an `EVENT` **only to that client**: `"welcome, <nick>! commands: /list, /msg <nick> <text>, /quit"` | OPEN (new after the cross-test) | a client that treats the line after `OK` as special, or that parses `EVENT` texts, could be confused — a client that just displays `EVENT`s (ours, g1's) shows one more notice. `interop.py` skips `EVENT`s with another text | `SESS_EV_WELCOME` (D22) |
 
 ---
 
@@ -143,6 +144,7 @@ that **our** programs never send (strict when sending, tolerant when receiving).
 | C13 | Client and `OK` | sends and keeps reading; `OK`s are not shown; only the answer to `NICK` is waited for (5 s) |
 | C14 | `/msg` echo | local: `<ana -> rui> (privado) …`, since the server sends no copy (A3) |
 | C15 | Language and libraries | C11 + POSIX + cJSON |
+| C16 | The client's input line (fix after the cross-test) | in a terminal, the client draws the line being typed itself (raw mode), with the nick in front (`ana> `): incoming messages never mix with it, what is sent appears once (the typed line is erased on Enter and the server's `CHAT` stays), Enter on an empty line does nothing. Without a terminal (pipe) nothing changes |
 
 ---
 
@@ -179,7 +181,8 @@ For a new group:
 6. Section **S** — do you read the slides the same way?
 
 Still to ask group 1: **A7** (`"`/`\` in nicks), **B2** (`QUIT` before `NICK`),
-**B4** (does the connection stay open after a 409?), **B7**, **B11** (503).
+**B4** (does the connection stay open after a 409?), **B7**, **B11** (503),
+**B14** (the welcome `EVENT`, new after the cross-test).
 
 ---
 
@@ -187,7 +190,7 @@ Still to ask group 1: **A7** (`"`/`\` in nicks), **B2** (`QUIT` before `NICK`),
 
 > Hi! We are the group doing the chat in C (repository Future_Networks). For
 > M3 we have the full protocol implemented and tested (`docs/PROTOCOL.md`,
-> v0.6), already agreed with one group. Most of it is fixed by the slides;
+> v0.7), already agreed with one group. Most of it is fixed by the slides;
 > only a few points really need agreeing (`docs/DECISIONS.md`, section A):
 >
 > 1. Which requests get an `OK`? Our reading of *"Last request accepted"*: every accepted request (`NICK`, `MSG`, `PRIV`, `QUIT`) gets an `OK`, always before the `CHAT`; `LIST` gets its `USERS`.
@@ -195,6 +198,7 @@ Still to ask group 1: **A7** (`"`/`\` in nicks), **B2** (`QUIT` before `NICK`),
 > 3. Limits: lines up to 64 KiB including `\n` (`ERROR 413` and close above it); text 1–4096 bytes, multi-line allowed (`ERROR 400 "text too long"` above it, connection stays open).
 > 4. Nicks: 1–32 bytes, no spaces, `"` or `\`?
 > 5. Receivers ignore unknown fields?
+> 6. After the `OK` to `NICK` our server sends a welcome `EVENT` with the commands, only to that client. Does your client just display it?
 >
 > Our server accepts IPv4 and IPv6 on port 5000. We also have plain-text test
 > scenarios that run against any server (`python3 scripts/interop.py <ip>

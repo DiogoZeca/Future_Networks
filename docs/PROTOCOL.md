@@ -1,4 +1,4 @@
-# Chat Protocol — v0.6
+# Chat Protocol — v0.7
 
 Shared specification for interoperability between groups (IF 2026/27).
 Message names and fields come from the course slides (slide 124) and are
@@ -125,7 +125,7 @@ LIST"*). A refused request gets only its `ERROR`.
 
 | Request | To the sender | To others |
 |---|---|---|
-| `NICK` | `OK` | `EVENT "<nick> joined"` |
+| `NICK` | `OK`, then a welcome `EVENT` (PROPOSAL, see below) | `EVENT "<nick> joined"` |
 | `MSG` | `OK`, then its own `CHAT` (`private:false`) | the same `CHAT` |
 | `PRIV` | `OK` only — **no copy** | the `CHAT` (`private:true`) to the recipient only |
 | `LIST` | `USERS` | — |
@@ -153,7 +153,8 @@ accepted?) and, optionally, after `QUIT`.
 | Who is `from` in a `CHAT`? | Always the nick of the sender's session. A `"from"` field sent by a client is ignored. | PROPOSAL |
 | What does `USERS` contain? | Every client that has completed `NICK`, **including the one asking**, sorted alphabetically ignoring ASCII case. Clients still without a nick are not listed. | AGREED (group 1 also lists users of linked servers) |
 | Exact `EVENT` text for join/leave | `"<nick> joined"` and `"<nick> left"` (the slide 124 example is `"rui joined"`). `QUIT` and a dropped connection give the same `"<nick> left"`. Clients display `EVENT` as a notice. | AGREED |
-| Who receives an `EVENT`? | Everyone **except** the client it is about. | AGREED |
+| Who receives a join/leave `EVENT`? | Everyone **except** the client it is about. | AGREED |
+| Is there any help for whoever joins? | **Yes:** right after the `OK` to `NICK`, an `EVENT` **only to that client**: `"welcome, <nick>! commands: /list, /msg <nick> <text>, /quit"` (the commands of slide 123). It is the server-side `/help` for clients without one (`nc`, other groups' clients) — slide 124 has no `HELP` type, and every client already displays `EVENT`s. Clients must show an `EVENT` they do not recognise as a plain notice, and must not expect any particular line after the `OK` (other traffic can come first). | PROPOSAL |
 | Does a client receive traffic before its `NICK` is accepted? | **No.** The first line a client sees is always the answer to its own `NICK` (`OK` or `ERROR`). Clients should still wait for `OK`/`ERROR` and display anything that arrives before it. | PROPOSAL |
 | Does leaving before a successful `NICK` produce an `EVENT`? | **No.** Nobody knew that client was there. | PROPOSAL |
 | What if a client stops reading (suspended laptop, `Ctrl+Z`)? | Each message the server sends must be fully accepted within **5 s**; otherwise that client is disconnected (the others get `"<nick> left"`). The mechanism and the value are each server's choice — what matters is that one stuck client never freezes the chat (slide 125). Group 1 uses a send queue (1 MiB / 1000 messages). | (slides): something must exist |
@@ -212,6 +213,7 @@ Normal session (`01_nick_ok`, `03_msg_chat`):
 ```
 > {"type":"NICK","nick":"ana"}
 < {"type":"OK"}
+< {"type":"EVENT","text":"welcome, ana! commands: /list, /msg <nick> <text>, /quit"}
 > {"type":"MSG","text":"hello"}
 < {"type":"OK"}
 < {"type":"CHAT","from":"ana","text":"hello","private":false}
@@ -305,6 +307,12 @@ bytes and the kernel may send a RST that swallows the 413 — a known problem,
 for M4.)
 
 ## Changelog
+
+- v0.7 — fixes after the first cross-test: a welcome `EVENT` with the
+  commands, only to the client that joined, right after the `OK` to `NICK`
+  (PROPOSAL). `interop.py` skips `EVENT`s with another text while it waits
+  for a specific one, so the scenarios pass against servers with or without
+  it.
 
 - v0.6 — first agreement with another group (group 1): `OK` to every accepted
   request (`MSG` and `PRIV` too), always before the `CHAT`; `PRIV` without a

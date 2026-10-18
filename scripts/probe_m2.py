@@ -67,13 +67,19 @@ def check(name, got, want):
         print(f"        obtido:   {got}\n        esperado: {want}")
         fails.append(name)
 
+# Correcao do M3 (D22): a quem entra, o OK e seguido de um EVENT de
+# boas-vindas so para ele, com os comandos.
+def welcome(nick):
+    return {"type":"EVENT",
+            "text":f"welcome, {nick}! commands: /list, /msg <nick> <text>, /quit"}
+
 # --- 1. tres clientes entram ---
 a, b, c = conn(), conn(), conn()
 send(a, {"type":"NICK","nick":"ana"})
-check("ana recebe OK", recv_all(a), [{"type":"OK"}])
+check("ana recebe OK (e as boas-vindas, D22)", recv_all(a), [{"type":"OK"}, welcome("ana")])
 
 send(b, {"type":"NICK","nick":"rui"})
-check("rui recebe OK", recv_all(b), [{"type":"OK"}])
+check("rui recebe OK (e as boas-vindas, D22)", recv_all(b), [{"type":"OK"}, welcome("rui")])
 check("ana e avisada de que o rui entrou",
       recv_all(a), [{"type":"EVENT","text":"rui joined"}])
 

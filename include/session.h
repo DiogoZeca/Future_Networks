@@ -88,6 +88,11 @@
  *       pode tentar outro na mesma ligação.
  *   -   PRIV e LIST antes do NICK → ERROR 401, como o MSG.
  *   -   USERS vindo de um cliente → ERROR 400 "unexpected type" (é S → C).
+ *
+ * CORREÇÃO DO M3 (depois do teste cruzado):
+ *   D22 NICK aceite → também um EVENT de boas-vindas SÓ para quem entrou,
+ *       com os comandos (SESS_EV_WELCOME): o "/help do lado do servidor",
+ *       útil a quem liga com nc ou com o cliente de outro grupo. PROPOSAL.
  */
 #ifndef SESSION_H
 #define SESSION_H
@@ -102,6 +107,10 @@
 #define SESS_R_TOOLONG       "line too long"     /* usado pelo main.c */
 #define SESS_R_NICK_TAKEN    "nick taken"        /* 409, o texto do slide 124 */
 #define SESS_R_NO_SUCH_NICK  "no such nick"      /* 404 */
+
+/* D22 (correção do M3): o EVENT de boas-vindas, só para quem entrou.
+ * O %s é o nick. Uma linha só e em inglês, como os outros textos do fio. */
+#define SESS_EV_WELCOME "welcome, %s! commands: /list, /msg <nick> <text>, /quit"
 
 enum sess_state {
     SESS_AWAITING_NICK = 0,   /* 0 de propósito: uma session a zeros é o início */
@@ -146,17 +155,17 @@ struct sess_out {
     struct msg     msg;
 };
 
-/* Máximo de saídas que uma linha pode produzir. São 2, e o OK é sempre a
- * primeira: NICK -> OK + EVENT; MSG -> OK + CHAT a todos; PRIV -> OK + CHAT
- * ao destino. */
-#define SESS_MAX_OUT 2
+/* Máximo de saídas que uma linha pode produzir, e o OK é sempre a primeira:
+ * NICK -> OK + EVENT "joined" (aos outros) + EVENT de boas-vindas (ao próprio,
+ * D22); MSG -> OK + CHAT a todos; PRIV -> OK + CHAT ao destino. */
+#define SESS_MAX_OUT 3
 
 /* Começa em AWAITING_NICK, com o diretório desta ligação. */
 void session_init(struct session *s, const struct sess_dir *dir);
 
 /* Trata UMA linha (sem o '\n', `len` do framing) e escreve as saídas em out[].
  *
- * Devolve quantas saídas produziu (1 ou 2 — toda a linha tem resposta, nem
+ * Devolve quantas saídas produziu (1 a 3 — toda a linha tem resposta, nem
  * que seja um ERROR). `cap` deve ser >= SESS_MAX_OUT; com menos, devolve só
  * as que couberem. Em SESS_CLOSED devolve 0: depois do QUIT não se responde a
  * mais nada (o main.c já não devia ter chamado).

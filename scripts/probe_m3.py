@@ -23,13 +23,19 @@ Seccoes:
      de 4097 -> 400 "text too long" e a ligacao continua; mensagem de varias
      linhas chega igual a outro cliente, e o nosso cliente mostra-a
      indentada e sem caracteres de controlo
+  9. correcao do M3: o nosso cliente NUM TERMINAL (pseudo-terminal, modulo
+     pty): o prompt "ana> ", uma mensagem que chega a meio da escrita nao se
+     mistura com ela, o que se envia aparece uma vez so, Enter sozinho nao
+     faz nada, Backspace apaga um caracter UTF-8 inteiro, setas ignoradas,
+     as boas-vindas do servidor (D22), e o terminal e reposto no Ctrl+D e
+     no Ctrl+C
 
 Uso:
     python3 scripts/probe_m3.py          # porta 5310 por omissao
 
 Espera encontrar ./bin/server e ./bin/client (correr a partir da raiz).
 """
-import atexit, json, socket, subprocess, sys, tempfile, threading, time
+import atexit, fcntl, json, os, pty, select, socket, struct, subprocess, sys, tempfile, termios, threading, time
 
 PORT = sys.argv[1] if len(sys.argv) > 1 else "5310"
 
@@ -70,6 +76,12 @@ def entra(nick):
     r = recv_all(s, 0.3)
     assert r[:1] == [{"type": "OK"}], f"{nick} nao entrou: {r}"
     return s
+
+
+def welcome(nick):
+    """O EVENT de boas-vindas que segue o OK a um NICK (correcao do M3, D22)."""
+    return {"type": "EVENT",
+            "text": f"welcome, {nick}! commands: /list, /msg <nick> <text>, /quit"}
 
 
 def sem_events(msgs):
@@ -124,7 +136,8 @@ ana = entra("ana")
 x = conn(); send(x, {"type": "NICK", "nick": "ANA"})
 check("\"ANA\" com \"ana\" ligada -> 409", [m.get("code") for m in recv_all(x)], [409])
 send(x, {"type": "NICK", "nick": "Rui"})
-check("e na mesma ligacao \"Rui\" entra (D19)", recv_all(x), [{"type": "OK"}])
+check("e na mesma ligacao \"Rui\" entra (D19), com as boas-vindas (D22)",
+      recv_all(x), [{"type": "OK"}, welcome("Rui")])
 rui = x
 zed = entra("zed")
 recv_all(ana); recv_all(rui)
@@ -215,7 +228,7 @@ check("os outros veem \"rui left\" e NAO o MSG colado depois",
       recv_all(ana), [{"type": "EVENT", "text": "rui left"}])
 time.sleep(0.2)
 r2 = conn(); send(r2, {"type": "NICK", "nick": "rui"})
-check("o nick \"rui\" ficou livre", recv_all(r2), [{"type": "OK"}])
+check("o nick \"rui\" ficou livre", recv_all(r2), [{"type": "OK"}, welcome("rui")])
 r2.close(); ana.close(); time.sleep(0.4)
 
 # --- 7. o nosso cliente de ponta a ponta ------------------------------------
@@ -292,6 +305,149 @@ out, _ = p.communicate("/quit\n", timeout=10)
 check("o nosso cliente mostra as linhas seguintes indentadas e o ESC como '?'",
       "<ana> linha 1\n    linha 2?[2J" in out, True)
 ana.close(); rui.close(); time.sleep(0.3)
+
+# --- 9. correcao do M3: o nosso cliente num terminal --------------------------
+print("9. ./bin/client num terminal (pty)")
+
+
+class Ecra:
+    """Um terminal minimo: o suficiente para o que o nosso cliente escreve
+    ('\\r', '\\n', ESC [ K, texto). Guarda as linhas como ficam no ecra — e e
+    isso que se verifica, nao os bytes: "aparece uma vez so" e uma pergunta
+    sobre o ecra."""
+
+    def __init__(self):
+        self.linhas = [""]; self.col = 0; self.pend = b""
+
+    def come(self, data):
+        data = self.pend + data; self.pend = b""
+        i = 0
+        while i < len(data):
+            c = data[i:i + 1]
+            if c == b"\x1b":
+                if data[i + 1:i + 3] == b"[K":      # apagar ate ao fim da linha
+                    l = self.linhas[-1]; self.linhas[-1] = l[:self.col]; i += 3; continue
+                if i + 3 > len(data):               # sequencia partida: esperar
+                    self.pend = data[i:]; return
+                i += 3; continue
+            if c == b"\r":
+                self.col = 0
+            elif c == b"\n":
+                self.linhas.append(""); self.col = 0
+            elif c == b"\a":
+                pass
+            else:                                   # texto (UTF-8 inteiro)
+                j = i + 1
+                while j < len(data) and data[j:j + 1] not in (b"\x1b", b"\r", b"\n", b"\a"):
+                    j += 1
+                try:
+                    t = data[i:j].decode()
+                except UnicodeDecodeError as e:
+                    if j == len(data) and j - (i + e.start) < 4:
+                        self.pend = data[i:]; return    # partido entre leituras
+                    t = data[i:j].decode(errors="replace")  # lixo: mostrar como tal
+                l = self.linhas[-1]
+                self.linhas[-1] = l[:self.col] + t + l[self.col + len(t):]
+                self.col += len(t); i = j; continue
+            i += 1
+
+    def ultima(self):
+        return self.linhas[-1]
+
+    def com(self, texto):
+        return [l for l in self.linhas if texto in l]
+
+
+def cliente_pty(nick):
+    pid, fd = pty.fork()
+    if pid == 0:                                    # filho: o terminal e o pty
+        os.execv("./bin/client", ["./bin/client", "127.0.0.1", PORT, nick])
+    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+    return pid, fd
+
+
+def ler_pty(fd, ecra, quieto=0.4):
+    """Le ate o cliente ficar calado `quieto` segundos."""
+    while True:
+        r, _, _ = select.select([fd], [], [], quieto)
+        if not r:
+            return
+        try:
+            d = os.read(fd, 65536)
+        except OSError:                             # o cliente terminou
+            return
+        if not d:
+            return
+        ecra.come(d)
+
+
+def eco_e_canon(fd):
+    lf = termios.tcgetattr(fd)[3]
+    return bool(lf & termios.ECHO) and bool(lf & termios.ICANON)
+
+
+rui = entra("rui"); recv_all(rui)
+pid, fd = cliente_pty("ana")
+ecra = Ecra()
+ler_pty(fd, ecra, 0.8); recv_all(rui)
+check("o prompt e o nick a frente: \"ana> \"", ecra.ultima(), "ana> ")
+check("as boas-vindas do servidor aparecem (D22)",
+      ecra.com("* welcome, ana! commands: /list, /msg <nick> <text>, /quit") != [], True)
+check("o terminal esta em modo raw (sem eco do terminal)", eco_e_canon(fd), False)
+
+# A meio da escrita chega uma mensagem: nao se misturam.
+os.write(fd, b"meio"); ler_pty(fd, ecra)
+send(rui, {"type": "MSG", "text": "boas"}); recv_all(rui); ler_pty(fd, ecra)
+check("a mensagem que chega fica numa linha so dela",
+      ecra.com("<rui> boas"), ["<rui> boas"])
+check("e o que se estava a escrever continua no prompt", ecra.ultima(), "ana> meio")
+
+# Enter: o rui recebe; no ecra da ana a mensagem aparece UMA vez.
+os.write(fd, b"\r"); ler_pty(fd, ecra)
+check("o rui recebe o que a ana escreveu",
+      [m.get("text") for m in recv_all(rui) if m.get("type") == "CHAT"], ["meio"])
+check("no ecra da ana aparece uma vez so (era o 'duplica no ecra')",
+      ecra.com("meio"), ["<ana> meio"])
+check("e o prompt fica vazio", ecra.ultima(), "ana> ")
+
+# Enter sozinho: nada sai e o ecra nao sobe.
+antes = list(ecra.linhas)
+os.write(fd, b"\r\r\r\r\r"); ler_pty(fd, ecra)
+check("5 Enters sozinhos: o ecra fica igual (era o 'spam de Enters')", ecra.linhas, antes)
+check("e nada chega ao servidor", recv_all(rui), [])
+
+# Backspace num caracter de 2 bytes, setas pelo meio, Ctrl+U.
+os.write(fd, "olé".encode() + b"\x7f" + b"a" + b"\x1b[A\x1b[D" + b"!\r"); ler_pty(fd, ecra)
+check("Backspace apaga o 'e' inteiro (2 bytes) e as setas nao entram no texto",
+      [m.get("text") for m in recv_all(rui) if m.get("type") == "CHAT"], ["ola!"])
+os.write(fd, b"lixo\x15fica\r"); ler_pty(fd, ecra)
+check("Ctrl+U apaga a linha",
+      [m.get("text") for m in recv_all(rui) if m.get("type") == "CHAT"], ["fica"])
+
+# /msg: aparece o eco local, nao o que se escreveu.
+os.write(fd, b"/msg rui segredo\r"); ler_pty(fd, ecra)
+check("/msg: o rui recebe o privado",
+      [(m.get("text"), m.get("private")) for m in recv_all(rui)], [("segredo", True)])
+check("/msg: no ecra fica so o eco local, uma vez",
+      ecra.com("segredo"), ["<ana -> rui> (privado) segredo"])
+
+# Ctrl+D: QUIT, sai com 0 e o terminal volta ao normal.
+os.write(fd, b"\x04"); ler_pty(fd, ecra, 0.8)
+_, st = os.waitpid(pid, 0)
+check("Ctrl+D: o cliente sai com 0", os.WIFEXITED(st) and os.WEXITSTATUS(st) == 0, True)
+check("e o terminal volta a ter eco e modo canonico", eco_e_canon(fd), True)
+check("o rui ve a ana sair", recv_all(rui), [{"type": "EVENT", "text": "ana left"}])
+os.close(fd)
+
+# Ctrl+C: o cliente morre (como antes: o QUIT no Ctrl+C e do M4), mas repoe
+# o terminal primeiro.
+pid, fd = cliente_pty("zed"); ler_pty(fd, Ecra(), 0.8); recv_all(rui)
+os.write(fd, b"meio escrito\x03"); time.sleep(0.5)
+_, st = os.waitpid(pid, 0)
+check("Ctrl+C: o cliente termina pelo SIGINT", os.WIFSIGNALED(st) and os.WTERMSIG(st) == 2, True)
+check("e o terminal foi reposto antes", eco_e_canon(fd), True)
+os.close(fd)
+rui.close(); time.sleep(0.3)
 
 # ----------------------------------------------------------------------------
 srv.terminate()

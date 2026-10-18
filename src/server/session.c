@@ -12,6 +12,8 @@
  * truncar o EVENT em silêncio. */
 _Static_assert(PROTO_NICK_MAX + sizeof(" joined") <= PROTO_TEXT_MAX,
                "o texto de um EVENT tem de caber num text");
+_Static_assert(PROTO_NICK_MAX + sizeof(SESS_EV_WELCOME) <= PROTO_TEXT_MAX,
+               "as boas-vindas (D22) têm de caber num text");
 
 void session_init(struct session *s, const struct sess_dir *dir)
 {
@@ -132,7 +134,7 @@ size_t session_handle(struct session *s, const char *line, size_t len,
         memcpy(s->nick, in.nick, sizeof s->nick);
         s->state = SESS_READY;
 
-        /* Duas saídas, e a ordem importa: o OK vai primeiro para que quem
+        /* Três saídas, e a ordem importa: o OK vai primeiro para que quem
          * entrou saiba que foi aceite antes de começar a receber tráfego. */
         memset(&out[0], 0, sizeof out[0]);
         out[0].dest     = SESS_SELF;
@@ -142,7 +144,19 @@ size_t session_handle(struct session *s, const char *line, size_t len,
 
         out[1].dest = SESS_OTHERS;   /* quem entra não precisa de ser avisado */
         fill_event(&out[1].msg, s->nick, "joined");
-        return 2;
+        if (cap < 3)
+            return 2;
+
+        /* D22 (correção do M3): as boas-vindas, só para quem entrou, com os
+         * comandos do slide 123. É o "/help do lado do servidor" — não há um
+         * tipo HELP no slide 124, e um EVENT qualquer cliente já sabe
+         * mostrar. Vai DEPOIS do "joined" para não mudar o índice das saídas
+         * que já existiam. */
+        out[2].dest = SESS_SELF;
+        memset(&out[2].msg, 0, sizeof out[2].msg);
+        out[2].msg.type = MT_EVENT;
+        snprintf(out[2].msg.text, sizeof out[2].msg.text, SESS_EV_WELCOME, s->nick);
+        return 3;
 
     case MT_MSG:
         if (s->state != SESS_READY)
