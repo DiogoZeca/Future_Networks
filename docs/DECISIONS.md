@@ -43,7 +43,7 @@ while our server keeps its 32-byte limit. Nothing to agree.
 
 | Group | Language | Who | Date | S confirmed | A agreed | `interop.py` against their server | Their client against our server |
 |---|---|---|---|---|---|---|---|
-| **g1** — *(group name)* | Python (?) | *(friend's name)* | 2026-10-14 | yes | A1–A6 (A7: ask) | to do | to do |
+| **g1** — *(group name)* | Python (?) | *(friend's name)* | 2026-10-14 | yes | A1–A6 (A7: ask) | **done** (by hand: `nc` + our client) | **done** (their client + `nc`) |
 | | | | | | | | |
 | | | | | | | | |
 
