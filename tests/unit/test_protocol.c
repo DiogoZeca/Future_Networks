@@ -745,6 +745,32 @@ static void caso_82_receber_tolerante(void)
 
 /* ------------------------------------------------------------------------ */
 
+/* 93. M4 (P38): uma linha que nao e UTF-8 valido e "invalid JSON" (RFC 8259
+ *     §8.1). Antes era aceite e reenviada a todos — e um cliente em Python
+ *     rebentava a ler o CHAT (encontrado pelo fuzz do pytest). */
+static void caso_93_utf8_invalido(void)
+{
+    CASE(93, "UTF-8 valido continua a passar (2, 3 e 4 bytes)");
+    CHECK_INT(parse("{\"type\":\"MSG\",\"text\":\"\xC3\xA9 \xE2\x82\xAC \xF0\x9F\x98\x80\"}"), 0);
+
+    CASE(93, "bytes invalidos: 400 invalid JSON");
+    const char *maus[] = {
+        "{\"type\":\"MSG\",\"text\":\"\xC3\x28\"}",          /* continuacao errada */
+        "{\"type\":\"MSG\",\"text\":\"\xFF\"}",              /* nunca e UTF-8 */
+        "{\"type\":\"MSG\",\"text\":\"\xC0\xAF\"}",          /* overlong de '/' */
+        "{\"type\":\"MSG\",\"text\":\"\xE0\x80\xAF\"}",      /* overlong de 3 */
+        "{\"type\":\"MSG\",\"text\":\"\xED\xA0\x80\"}",      /* surrogate */
+        "{\"type\":\"MSG\",\"text\":\"\xF4\x90\x80\x80\"}", /* > U+10FFFF */
+        "{\"type\":\"MSG\",\"text\":\"\xE2\x82\"}",          /* cortado */
+        "{\"type\":\"NICK\",\"nick\":\"z\xE9\"}",             /* Latin-1, nao UTF-8 */
+    };
+    for (size_t i = 0; i < sizeof maus / sizeof maus[0]; i++) {
+        CHECK_INT(parse(maus[i]), -1);
+        CHECK_STR(err.reason, "invalid JSON");
+        CHECK_INT(err.code, 400);
+    }
+}
+
 int main(void)
 {
     caso_11_validos();
@@ -770,5 +796,6 @@ int main(void)
     caso_62_nick_eq();
     caso_81_text_dos_pedidos();
     caso_82_receber_tolerante();
+    caso_93_utf8_invalido();
     return t_report("protocol");
 }

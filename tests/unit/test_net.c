@@ -18,6 +18,11 @@
  *   77  tcp_listen() aceita IPv4 E IPv6 no mesmo socket — com ligações reais
  *       em 127.0.0.1 e em ::1. Numa máquina sem IPv6 verifica o recurso a
  *       IPv4 e diz que saltou a parte IPv6.
+ *
+ * M4:
+ *   90  wait_readable(): prazo, bytes, FIN e o pipe de paragem (Ctrl+C)
+ *   91  linger_drain(): o FIN sai depois do que já foi enviado, o que o peer
+ *       ainda manda é lido e deitado fora, e há um prazo
  */
 #include "net.h"
 #include "test_util.h"
@@ -29,6 +34,7 @@
 #include <stdlib.h>
 #include <sys/socket.h>
 #include <time.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 /* Mais do que cabe nos buffers do kernel de um socketpair (algumas centenas
@@ -258,6 +264,82 @@ static void caso_77_dual_stack(void)
     close(lfd);
 }
 
+/* ---- M4 ---------------------------------------------------------------- */
+
+static void caso_90_wait_readable(void)
+{
+    int sv[2], stop[2];
+    socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
+    if (pipe(stop) != 0)
+        return;
+
+    CASE(90, "nada para ler: NET_TIMEOUT, e so depois do prazo");
+    long t0 = now_ms();
+    CHECK_INT(wait_readable(sv[0], stop[0], 150), NET_TIMEOUT);
+    long dt = now_ms() - t0;
+    CHECK(dt >= 140 && dt < 1000);
+
+    CASE(90, "prazo 0: nao espera");
+    CHECK_INT(wait_readable(sv[0], -1, 0), NET_TIMEOUT);
+
+    CASE(90, "bytes: NET_READY");
+    CHECK_INT(write(sv[1], "x", 1), 1);
+    CHECK_INT(wait_readable(sv[0], stop[0], 1000), NET_READY);
+    char c;
+    CHECK_INT(read(sv[0], &c, 1), 1);
+
+    CASE(90, "o pipe de paragem tem prioridade, mesmo com bytes a espera");
+    CHECK_INT(write(sv[1], "y", 1), 1);
+    CHECK_INT(write(stop[1], "s", 1), 1);
+    CHECK_INT(wait_readable(sv[0], stop[0], 1000), NET_STOP);
+    CHECK_INT(wait_readable(sv[0], stop[0], -1), NET_STOP);   /* continua (nunca se le) */
+
+    CASE(90, "o FIN do outro lado tambem acorda (o recv() a seguir da 0)");
+    close(stop[0]); close(stop[1]);
+    CHECK_INT(read(sv[0], &c, 1), 1);
+    close(sv[1]);
+    CHECK_INT(wait_readable(sv[0], -1, 1000), NET_READY);
+    CHECK_INT(recv(sv[0], &c, 1, 0), 0);
+    close(sv[0]);
+}
+
+static void caso_91_linger_drain(void)
+{
+    int sv[2];
+    char buf[64];
+
+    CASE(91, "o que ja tinhamos enviado chega ANTES do nosso FIN; o lixo do peer e lido");
+    socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
+    CHECK_INT(write(sv[0], "ultima\n", 7), 7);           /* a nossa ultima resposta */
+    CHECK_INT(write(sv[1], "lixo por ler", 12), 12);      /* o peer ainda mandou mais */
+    long t0 = now_ms();
+    pid_t pid = fork();
+    if (pid == 0) {                       /* o peer: le tudo ate ao FIN, e fecha */
+        close(sv[0]);
+        char b[64];
+        ssize_t n, tot = 0;
+        while ((n = read(sv[1], b + tot, sizeof b - (size_t)tot)) > 0)
+            tot += n;
+        _exit(tot == 7 && memcmp(b, "ultima\n", 7) == 0 ? 0 : 1);
+    }
+    close(sv[1]);                         /* so o filho fica com o lado do peer */
+    CHECK_INT(linger_drain(sv[0], 2000), 0);              /* leu o lixo e o FIN */
+    CHECK(now_ms() - t0 < 1500);
+    int st = 0;
+    waitpid(pid, &st, 0);
+    CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 0);         /* o peer recebeu "ultima" */
+    close(sv[0]);
+
+    CASE(91, "um peer que nao fecha: desiste ao fim do prazo");
+    socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
+    t0 = now_ms();
+    CHECK_INT(linger_drain(sv[0], 200), 1);
+    long dt = now_ms() - t0;
+    CHECK(dt >= 190 && dt < 1000);
+    CHECK_INT(read(sv[1], buf, sizeof buf), 0);           /* mas o FIN saiu */
+    close(sv[0]); close(sv[1]);
+}
+
 int main(void)
 {
     caso_53_normal();
@@ -267,5 +349,7 @@ int main(void)
     caso_57_meia_mensagem();
     caso_76_addr_to_str();
     caso_77_dual_stack();
+    caso_90_wait_readable();
+    caso_91_linger_drain();
     return t_report("net");
 }

@@ -226,6 +226,42 @@ static int is_json_space(char c)
     return c == ' ' || c == '\t' || c == '\r' || c == '\n';
 }
 
+/* M4 (P38): a linha é UTF-8 válido? O JSON trocado entre sistemas TEM de ser
+ * UTF-8 (RFC 8259 §8.1), e o cJSON não o verifica: sem isto, um texto com
+ * bytes inválidos era aceite e reenviado a toda a gente — e um cliente em
+ * Python (json.loads sobre bytes) rebentava com UnicodeDecodeError. Estrito:
+ * sem "overlong" (C0, C1, E0 80.., F0 80..), sem surrogates (ED A0..), nada
+ * acima de U+10FFFF (F4 90.., F5..FF). */
+static int utf8_valid(const unsigned char *s, size_t len)
+{
+    size_t i = 0;
+    while (i < len) {
+        unsigned char c = s[i];
+        if (c < 0x80) {
+            i++;
+            continue;
+        }
+        size_t        n;
+        unsigned char lo = 0x80, hi = 0xBF;     /* limites do 2.º byte */
+        if (c >= 0xC2 && c <= 0xDF)      n = 2;
+        else if (c == 0xE0)            { n = 3; lo = 0xA0; }
+        else if (c == 0xED)            { n = 3; hi = 0x9F; }
+        else if (c >= 0xE1 && c <= 0xEF) n = 3;
+        else if (c == 0xF0)            { n = 4; lo = 0x90; }
+        else if (c == 0xF4)            { n = 4; hi = 0x8F; }
+        else if (c >= 0xF1 && c <= 0xF3) n = 4;
+        else
+            return 0;                           /* 80..C1, F5..FF */
+        if (len - i < n || s[i + 1] < lo || s[i + 1] > hi)
+            return 0;
+        for (size_t k = 2; k < n; k++)
+            if ((s[i + k] & 0xC0) != 0x80)
+                return 0;
+        i += n;
+    }
+    return 1;
+}
+
 int proto_parse(const char *line, size_t len, struct msg *out, struct proto_err *err)
 {
     memset(out, 0, sizeof *out);            /* nunca meio preenchido */
@@ -234,6 +270,10 @@ int proto_parse(const char *line, size_t len, struct msg *out, struct proto_err 
 
     /* '\0' embebido: o cJSON pararia nele e leria só metade (teste #29). */
     if (memchr(line, '\0', len) != NULL)
+        return -1;
+
+    /* Bytes que não são UTF-8 (M4, P38): também "invalid JSON". */
+    if (!utf8_valid((const unsigned char *)line, len))
         return -1;
 
     /* ParseWithLength(Opts) e não cJSON_Parse: a linha NÃO é terminada em

@@ -93,6 +93,15 @@
  *   D22 NICK aceite → também um EVENT de boas-vindas SÓ para quem entrou,
  *       com os comandos (SESS_EV_WELCOME): o "/help do lado do servidor",
  *       útil a quem liga com nc ou com o cliente de outro grupo. PROPOSAL.
+ *
+ * M4:
+ *   D23 Inatividade: sem receber nenhuma MENSAGEM (linha completa) durante o
+ *       prazo → ERROR 408 e a ligação fecha. Antes do NICK o prazo é curto e
+ *       conta desde a ligação (reason "nick timeout"); depois, conta desde a
+ *       última mensagem (reason "idle timeout"). Os prazos são do main.c.
+ *   D24 Encerramento (Ctrl+C): EVENT "server shutting down" a cada ligação
+ *       (também a quem ainda não fez NICK) e a ligação fecha. Não há "x left"
+ *       para ninguém: estão todos a sair.
  */
 #ifndef SESSION_H
 #define SESSION_H
@@ -111,6 +120,12 @@
 /* D22 (correção do M3): o EVENT de boas-vindas, só para quem entrou.
  * O %s é o nick. Uma linha só e em inglês, como os outros textos do fio. */
 #define SESS_EV_WELCOME "welcome, %s! commands: /list, /msg <nick> <text>, /quit"
+
+/* M4 (DECISIONS.md D1, D3). O "quanto tempo" é do servidor (main.c, -i/-n);
+ * o "o que se diz" está aqui, com as outras decisões. */
+#define SESS_R_IDLE          "idle timeout"      /* 408: nada recebido há muito */
+#define SESS_R_NICK_TIMEOUT  "nick timeout"      /* 408: ligou e não fez NICK a tempo */
+#define SESS_EV_SHUTDOWN     "server shutting down"
 
 enum sess_state {
     SESS_AWAITING_NICK = 0,   /* 0 de propósito: uma session a zeros é o início */
@@ -177,6 +192,14 @@ void session_init(struct session *s, const struct sess_dir *dir);
  * testes verificam-no em todos os casos). */
 size_t session_handle(struct session *s, const char *line, size_t len,
                       struct sess_out *out, size_t cap);
+
+/* M4 (D23): a resposta a quem esteve inativo de mais — sempre 1 saída, um
+ * ERROR 408 para o próprio, com o reason conforme o estado. Depois disto o
+ * main.c fecha a ligação. */
+size_t session_timeout(const struct session *s, struct sess_out *out);
+
+/* M4 (D24): o aviso de encerramento, para o próprio. Sempre 1 saída. */
+size_t session_shutdown(struct sess_out *out);
 
 /* O EVENT de saída, para quando a ligação fecha.
  *

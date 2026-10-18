@@ -28,7 +28,7 @@ LIB_OBJ := $(filter-out %/main.o,$(SERVER_OBJ) $(CLIENT_OBJ))
 
 ALL_OBJ := $(COMMON_OBJ) $(SERVER_OBJ) $(CLIENT_OBJ) $(TEST_OBJ)
 
-.PHONY: all clean test
+.PHONY: all clean test pytest
 
 all: $(BIN)/server $(BIN)/client
 
@@ -64,6 +64,12 @@ test: $(TEST_BIN)
 	done; \
 	if [ $$fail -ne 0 ]; then echo "RESULTADO: FALHOU"; exit 1; fi; \
 	echo "RESULTADO: tudo passou"
+
+# Testes de sistema (M4, slide 123: "automated tests with pytest"): o
+# servidor e o cliente a sério, com ligações reais. PYTEST_ARGS para escolher,
+# ex.: make pytest PYTEST_ARGS='-m "not slow"'
+pytest: all
+	python3 -m pytest tests/system $(PYTEST_ARGS)
 
 clean:
 	rm -rf $(BUILD) $(BIN)

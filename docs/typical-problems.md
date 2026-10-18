@@ -66,6 +66,21 @@ Observada em 2026-10-14 (detalhe em `milestones/M3.md`, P20–P22 e P28–P29):
 | Linha de 64 KiB + 1 byte | — | `ERROR 413` e fecho; de vez em quando o RST engole o 413 (2.2, M4) |
 | `probe_m2.py` §7 numa máquina mais lenta (VM) | espera fixa de 0,5 s: falha sem bug no servidor (também com o código do M2) | espera até a mensagem chegar: passa |
 
+## 0.4 Evidência medida no M4
+
+Observada em 2026-10-18 (detalhe em `milestones/M4.md`, P38–P45):
+
+| Experiência | Antes | Depois do M4 |
+|---|---|---|
+| Linha de 70 KB (e mais 50 KB atrás), 20 vezes | de vez em quando o RST engolia o `413` | 20/20: `413` e FIN |
+| `QUIT` com 200 KB de lixo atrás, 20 vezes | idem com o `OK` | 20/20: `OK` e FIN |
+| Uma ligação que nunca diz nada | ficava para sempre | `408` ao fim de 30 s (sem `NICK`) / 300 s |
+| 500 linhas de lixo de 8 espécies seguidas | uma com UTF-8 inválido era **aceite e reenviada a todos** (e rebentava o cliente Python do teste) | 500 × `400`; a ligação continua |
+| Ctrl+C no servidor | morria; ninguém avisado; memória nunca libertada | aviso a todos, FIN, saída 0; LeakSanitizer limpo |
+| Os 98 testes de sistema com ASan, e com TSan | — | zero relatórios |
+| A 1.ª versão do Ctrl+C (`pselect`) sob o TSan | — | o sinal só era tratado na ligação seguinte; corrigido com um pipe (P44) |
+| O cliente quando o servidor fecha, com o stdin num pipe aberto, no Ubuntu 24.04 (glibc 2.39) | **nunca terminava**: o `exit()` da thread de leitura esperava pelo lock do `stdin`, que o `fgets()` da principal tinha (no 22.04 passava) | `term_exit()`: `_exit()` depois de despejar à mão (P46) |
+
 ---
 
 ## 1. TCP é um byte stream, não um stream de mensagens
@@ -120,6 +135,7 @@ desligar?"*. São quatro cenários distintos, com sintomas diferentes.
 - **Como evitar:** `MSG_NOSIGNAL` no `send()` (ou ignorar `SIGPIPE` no arranque), e tratar `ECONNRESET`/`EPIPE` como "cliente foi-se embora" - não como erro fatal do servidor.
 - **Estado:** `Resolvido` - `MSG_NOSIGNAL` em `send_all()`; verificado experimentalmente nos dois sentidos.
 - **Visto de novo no M1, do nosso lado:** ao recusar uma linha demasiado longa, o servidor fecha com bytes do cliente **ainda por ler** - e o kernel manda RST. Se o RST chegar antes de o cliente ler o `ERROR "line too long"`, o cliente nunca o vê. Resolver exige continuar a ler (e deitar fora) durante algum tempo antes de fechar, o que precisa de timeouts - **M4**.
+- **Resolvido no M4:** `linger_drain()` sempre que é o servidor a fechar (413, `QUIT`, 408, 503, encerramento): `shutdown(SHUT_WR)` (o FIN sai depois da última resposta) e ler e deitar fora até o cliente fechar, no máximo 2 s. Prova: `test_robustness.py`, 413 e `QUIT`+lixo 20 vezes cada, sempre a resposta e FIN; mutação 8 do M4.md (sem o linger, falha logo na 1.ª ronda).
 
 ### 2.3 Morte silenciosa - cabo desligado, Wi-Fi caído, máquina sem energia
 
@@ -129,7 +145,7 @@ desligar?"*. São quatro cenários distintos, com sintomas diferentes.
   - *idle timeout* ao nível da aplicação (`SO_RCVTIMEO`, ou `poll()` com timeout): sem nada recebido em N segundos, assume-se morto e fecha-se; **e/ou**
   - *heartbeat*: `PING`/`PONG` periódico - mais fiável, porque distingue "ligação morta" de "utilizador calado". Como `PING` não está na lista fixa do slide 124, tem de ser negociado com os outros grupos ou implementado de forma compatível (ex.: o servidor usa um `EVENT` inócuo, ou mede só a inatividade).
   - `SO_KEEPALIVE` com `TCP_KEEPIDLE`/`TCP_KEEPINTVL`/`TCP_KEEPCNT` é a alternativa ao nível do kernel; funciona, mas as opções são específicas de Linux.
-- **Estado:** `Parcial` - **M2** / `Por resolver` - **M4** ("idle timeout"). Desde o M2, **se houver tráfego** para esse cliente, o prazo de envio (2.4) apanha-o: os broadcasts acumulam-se, o buffer enche, o envio expira ao fim de 5 s e ele é desligado (com `EVENT "x left"`). **Sem tráfego** continua invisível até ao M4. **É o cenário mais provável de ser perguntado na defesa.** Vale a pena saber explicar porque é que é diferente de 2.1 e 2.2.
+- **Estado:** `Resolvido` - **M4** (D23): 300 s sem nenhuma **mensagem** → `ERROR 408 "idle timeout"` e fecho; antes do `NICK`, 30 s desde a ligação. Do lado do cliente, o nosso manda um `LIST` silencioso a cada 120 s sem enviar nada (não é desligado por estar só a ler) e, se esse `LIST` ficar sem resposta mais 120 s, conclui que o **servidor** morreu em silêncio e sai. Provas: `test_robustness.py` (prazos), `test_client.py` (keepalive, servidor mudo). *Antes do M4:* desde o M2, **se houver tráfego** para esse cliente, o prazo de envio (2.4) apanha-o: os broadcasts acumulam-se, o buffer enche, o envio expira ao fim de 5 s e ele é desligado (com `EVENT "x left"`). **Sem tráfego** continua invisível até ao M4. **É o cenário mais provável de ser perguntado na defesa.** Vale a pena saber explicar porque é que é diferente de 2.1 e 2.2.
 
 ### 2.4 Cliente lento ou parado - não morreu, só não lê
 
@@ -301,11 +317,13 @@ Relevante porque os outros grupos não usam todos Linux.
 - [ ] `make` sem avisos
 - [ ] `make SAN=1` e correr os testes - sem relatórios do ASan/UBSan
 - [ ] Matar um cliente com `kill -9` → servidor sobrevive e remove-o
-- [ ] Suspender um cliente com `Ctrl+Z` → os outros continuam a falar (M2+); para encher mesmo os buffers, `probe_m2.py` §7
-- [ ] `Ctrl+C` no servidor → fecha os sockets, sem "address already in use" a seguir
+- [ ] `make pytest` (e `make clean && make pytest SAN=1`) - 0 falhas (M4+)
+- [ ] Suspender um cliente com `Ctrl+Z` → os outros continuam a falar (M2+); para encher mesmo os buffers, `test_concurrency.py`
+- [ ] `Ctrl+C` no servidor → os clientes veem `server shutting down`, sai com 0, sem "address already in use" a seguir (M4)
+- [ ] Um `nc` calado → `408` ao fim de 30 s (sem `NICK`) ou 300 s (M4)
 - [ ] Enviar lixo (`echo "nao e json" | nc host porta`) → `ERROR`, não crash
 - [ ] Enviar uma linha de 1 MB sem `\n` → `ERROR`, não overflow
 - [ ] Testar entre **duas máquinas**, não só em loopback
 - [ ] Testar contra o servidor de outro grupo (e preencher o registo no `DECISIONS.md`)
-- [ ] Dois clientes com o mesmo nick ao mesmo tempo → um `OK`, um `409` (M3+; `probe_m3.py` §1)
+- [ ] Dois clientes com o mesmo nick ao mesmo tempo → um `OK`, um `409` (M3+; `test_concurrency.py`)
 - [ ] Notas do milestone preenchidas em `docs/milestones/`

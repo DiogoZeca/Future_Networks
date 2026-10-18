@@ -1,4 +1,5 @@
 #include "net.h"
+#include "log.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -71,10 +72,11 @@ int tcp_listen(const char *port, int backlog)
 
     fd = listen_family(AF_INET, port, backlog, &why4);
     if (fd >= 0) {
-        fprintf(stderr, "[net] sem IPv6 (%s): a escutar so em IPv4\n", why6);
+        /* tcp_listen() é do servidor: vai para o log, como o resto (M4). */
+        log_warn("sem IPv6 (%s): a escutar so em IPv4", why6);
         return fd;
     }
-    fprintf(stderr, "listen na porta %s: %s\n", port, why4);
+    log_error("listen na porta %s: %s", port, why4);
     return -1;
 }
 
@@ -137,16 +139,22 @@ static long ms_left(const struct timespec *deadline)
          + (deadline->tv_nsec - now.tv_nsec) / 1000000;
 }
 
+/* deadline = agora + ms (CLOCK_MONOTONIC). */
+static void deadline_in(struct timespec *d, long ms)
+{
+    clock_gettime(CLOCK_MONOTONIC, d);
+    d->tv_sec  += ms / 1000;
+    d->tv_nsec += (ms % 1000) * 1000000L;
+    if (d->tv_nsec >= 1000000000L) {
+        d->tv_sec++;
+        d->tv_nsec -= 1000000000L;
+    }
+}
+
 int send_all_timeout(int fd, const void *buf, size_t len, int timeout_ms)
 {
     struct timespec deadline;
-    clock_gettime(CLOCK_MONOTONIC, &deadline);
-    deadline.tv_sec  += timeout_ms / 1000;
-    deadline.tv_nsec += (long)(timeout_ms % 1000) * 1000000;
-    if (deadline.tv_nsec >= 1000000000L) {
-        deadline.tv_sec++;
-        deadline.tv_nsec -= 1000000000L;
-    }
+    deadline_in(&deadline, timeout_ms);
 
     const char *p = buf;
     while (len > 0) {
@@ -178,6 +186,64 @@ int send_all_timeout(int fd, const void *buf, size_t len, int timeout_ms)
          * EINTR: voltar ao send(). */
     }
     return 0;
+}
+
+int wait_readable(int fd, int stop_fd, long timeout_ms)
+{
+    struct timespec deadline;
+    if (timeout_ms >= 0)
+        deadline_in(&deadline, timeout_ms);
+
+    struct pollfd pfd[2] = {
+        { .fd = fd,      .events = POLLIN },
+        { .fd = stop_fd, .events = POLLIN },  /* fd < 0: o poll() ignora-o */
+    };
+    for (;;) {
+        long left = -1;
+        if (timeout_ms >= 0) {
+            left = ms_left(&deadline);
+            if (left < 0)
+                left = 0;
+        }
+        int r = poll(pfd, 2, (int)left);
+        if (r < 0) {
+            if (errno == EINTR)
+                continue;                      /* o prazo continua a contar */
+            return -1;
+        }
+        if (r == 0)
+            return NET_TIMEOUT;
+        if (stop_fd >= 0 && pfd[1].revents != 0)
+            return NET_STOP;
+        if (pfd[0].revents != 0)               /* POLLIN, POLLHUP ou POLLERR */
+            return NET_READY;
+    }
+}
+
+int linger_drain(int fd, long timeout_ms)
+{
+    char sink[4096];
+
+    shutdown(fd, SHUT_WR);                     /* FIN depois do que já saiu */
+    struct timespec deadline;
+    deadline_in(&deadline, timeout_ms);
+    for (;;) {
+        long left = ms_left(&deadline);
+        if (left <= 0)
+            return 1;
+        int w = wait_readable(fd, -1, left);
+        if (w == NET_TIMEOUT)
+            return 1;
+        if (w < 0)
+            return -1;
+        ssize_t n = recv_retry(fd, sink, sizeof sink);
+        if (n == 0)
+            return 0;                          /* o FIN do peer: limpo */
+        if (n < 0)
+            return -1;
+        /* n > 0: bytes depois do fim (o resto da linha longa, o que veio
+         * colado ao QUIT...). Deitar fora e continuar. */
+    }
 }
 
 ssize_t recv_retry(int fd, void *buf, size_t len)

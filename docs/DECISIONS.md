@@ -4,7 +4,7 @@ What **has to be agreed** with the other groups so that our client works with
 their servers and our server works with their clients — what is already
 agreed, and what does **not** need agreeing because the slides decide it.
 
-- The specification is in [`PROTOCOL.md`](PROTOCOL.md) (v0.7). This file says
+- The specification is in [`PROTOCOL.md`](PROTOCOL.md) (v0.8). This file says
   **what to ask**, what was agreed with whom, and what happens if two groups
   decide differently.
 - Every row has **our position**, implemented and tested. Each decision lives
@@ -109,7 +109,7 @@ everywhere, and makes our conformance scenarios pass against other servers.
 | B2 | `QUIT`: does the server answer before closing? | **`OK`, then close**; also before `NICK` | **AGREED (g1)** (before `NICK`: ask) | a client expecting `OK` shows nothing; ours works either way | `case MT_QUIT` (D17) |
 | B3 | Are nicks case-sensitive for uniqueness (and for finding the recipient of a `PRIV`)? | **no**: `Ana` = `ana` (ASCII letters only); shown as typed | **differs from g1** (case-sensitive) — kept: only changes which nicks each server allows | one server allows `Ana` and `ana` together; `/msg Rui` works on one server and gives 404 on another | `proto_nick_eq()` (D18) |
 | B4 | After a `409`, does the connection stay open? | **yes**, the client can try another nick | OPEN | our client asks for another nick and retries; against a server that closes, it reports the close | `session.c` (D19) |
-| B5 | Error codes | **400** malformed, **401** before `NICK`, **404** `PRIV` to someone not in the chat, **409** nick taken, **413** line too long, **503** server full | **AGREED (g1)** except 503 (ask); g1 also has **408** for idle (M4, D1) | users see different codes; our scenarios compare codes | `session.c`, `protocol.h` |
+| B5 | Error codes | **400** malformed, **401** before `NICK`, **404** `PRIV` to someone not in the chat, **409** nick taken, **413** line too long, **503** server full, **408** idle (M4) | **AGREED (g1)** except 503 (ask); 408 is g1's | users see different codes; our scenarios compare codes | `session.c`, `protocol.h` |
 | B6 | `PRIV` to a nick that is not in the chat | `ERROR 404 "no such nick"` | **AGREED (g1)** | see B5 | `handle_priv()` (D15) |
 | B7 | `PRIV` to oneself | `OK` + the `CHAT`, once | OPEN | may appear twice | `handle_priv()` |
 | B8 | Who receives an `EVENT` | everyone **except** the client it is about | **AGREED (g1)** | the joiner sees a notice about themselves | `SESS_OTHERS` (D10) |
@@ -157,10 +157,10 @@ natural starting point.
 
 | # | Milestone | Fixed by the slides | Still open | Initial idea (not implemented yet) |
 |---|---|---|---|---|
-| D1 | M4 | an **idle timeout** must exist | how long; is the client told before? | **as group 1:** 300 s, then `ERROR 408` and close |
-| D2 | M4 | — | keepalive? (slide 124 has no `PING`; a new type would be `unknown type` elsewhere) | **no** new type: a client that wants to stay connected sends a `LIST` |
-| D3 | M4 | **Ctrl+C shutdown that closes sockets** | are clients told? | `EVENT "server shutting down"` to everyone, then close |
-| D4 | M4 | **automated tests with pytest** | — (internal) | our network tests are already Python scripts; turn them into pytest |
+| D1 | M4 | an **idle timeout** must exist | how long; is the client told before? | **implemented (M4, D23):** 300 s without a message → `ERROR 408 "idle timeout"` and close, **as group 1**; 30 s to send a `NICK` (`408 "nick timeout"`, internal) |
+| D2 | M4 | — | keepalive? (slide 124 has no `PING`; a new type would be `unknown type` elsewhere) | **implemented (M4, D25):** no new type — our client sends a `LIST` after 120 s without sending anything and hides the `USERS`; no answer for another 120 s → the server is gone. **Ask:** do your clients send something when the user is only reading? |
+| D3 | M4 | **Ctrl+C shutdown that closes sockets** | are clients told? | **implemented (M4, D24):** `EVENT "server shutting down"` to every connection, then FIN; no `"x left"` |
+| D4 | M4 | **automated tests with pytest** | — (internal) | **implemented:** `tests/system/` (98 tests); `test_interop.py --host <ip> --port <p>` runs our scenarios against another group's server |
 | D5 | M5 | the server answers a **UDP broadcast** called **`DISCOVER`** with **its TCP port** | exact JSON of the request and the reply; UDP port; client wait time | **as group 1:** request `{"type":"DISCOVER"}` (also accept the plain text `DISCOVER`); reply `{"type":"SERVER","tcp_port":5000,…}`; UDP port **5001**; the IP is the packet's **source**, never trusted from a field; accept `{"port":N}` from other groups |
 | D6 | M6-A | file transfer with **length-prefixed binary frames** | the header and how it coexists with the JSON lines | to agree between the groups that pick it |
 | D7 | M6-B | **TLS** with `ssl` and a **self-signed certificate** | same port or another? | another port (e.g. `5443`), so clients without TLS do not break; group 1 answers TLS bytes on the normal port with `ERROR 400` and closes |
@@ -182,7 +182,8 @@ For a new group:
 
 Still to ask group 1: **A7** (`"`/`\` in nicks), **B2** (`QUIT` before `NICK`),
 **B4** (does the connection stay open after a 409?), **B7**, **B11** (503),
-**B14** (the welcome `EVENT`, new after the cross-test).
+**B14** (the welcome `EVENT`, new after the cross-test), **D2** (keepalive),
+**D3** (the shutdown `EVENT`).
 
 ---
 
@@ -199,6 +200,7 @@ Still to ask group 1: **A7** (`"`/`\` in nicks), **B2** (`QUIT` before `NICK`),
 > 4. Nicks: 1–32 bytes, no spaces, `"` or `\`?
 > 5. Receivers ignore unknown fields?
 > 6. After the `OK` to `NICK` our server sends a welcome `EVENT` with the commands, only to that client. Does your client just display it?
+> 7. Idle: after 300 s without a message our server sends `ERROR 408 "idle timeout"` and closes (like group 1). Our client sends a `LIST` every 120 s when the user is only reading. On Ctrl+C the server sends `EVENT "server shutting down"` before closing.
 >
 > Our server accepts IPv4 and IPv6 on port 5000. We also have plain-text test
 > scenarios that run against any server (`python3 scripts/interop.py <ip>

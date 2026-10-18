@@ -34,7 +34,7 @@ static void fake_add(const char *nick)
 }
 
 /* Reservar = entrar logo na lista (aqui não há a janela entre o OK e o join
- * do servidor; essa testa-se no test_roster e no probe_m3.py). */
+ * do servidor; essa testa-se no test_roster e no tests/system/test_concurrency.py). */
 static int fake_claim(void *ctx, const char *nick)
 {
     (void)ctx;
@@ -604,6 +604,33 @@ static void caso_88_boas_vindas(void)
     CHECK(two[0].msg.type == MT_OK && two[1].dest == SESS_OTHERS);
 }
 
+/* ---- M4 ---------------------------------------------------------------- */
+
+/* 92. D23/D24: o que se diz a quem esteve inativo, e no encerramento. */
+static void caso_92_timeout_e_shutdown(void)
+{
+    struct sess_out o[1];
+
+    CASE(92, "inativo antes do NICK -> 408 \"nick timeout\", so para o proprio");
+    start(&s);
+    CHECK_INT(session_timeout(&s, o), 1);
+    CHECK_INT(o[0].dest, SESS_SELF);
+    CHECK_INT(proto_encode(&o[0].msg, wire, sizeof wire, NULL), 0);
+    CHECK_STR(wire, "{\"type\":\"ERROR\",\"code\":408,\"reason\":\"nick timeout\"}\n");
+
+    CASE(92, "inativo depois do NICK -> 408 \"idle timeout\"");
+    send_line(NICK_ANA);
+    session_timeout(&s, o);
+    proto_encode(&o[0].msg, wire, sizeof wire, NULL);
+    CHECK_STR(wire, "{\"type\":\"ERROR\",\"code\":408,\"reason\":\"idle timeout\"}\n");
+
+    CASE(92, "encerramento -> EVENT \"server shutting down\", para o proprio");
+    CHECK_INT(session_shutdown(o), 1);
+    CHECK_INT(o[0].dest, SESS_SELF);
+    proto_encode(&o[0].msg, wire, sizeof wire, NULL);
+    CHECK_STR(wire, "{\"type\":\"EVENT\",\"text\":\"server shutting down\"}\n");
+}
+
 /* ------------------------------------------------------------------------ */
 
 int main(void)
@@ -631,5 +658,6 @@ int main(void)
     caso_70_users_do_cliente();
     caso_83_ok_antes_do_chat();
     caso_88_boas_vindas();
+    caso_92_timeout_e_shutdown();
     return t_report("session");
 }

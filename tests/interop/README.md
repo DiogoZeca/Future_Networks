@@ -3,7 +3,9 @@
 Ficheiros de texto independentes da linguagem: qualquer grupo pode corrê-los
 contra qualquer servidor (com `nc` ou com `scripts/`).
 
-Correr: `python3 scripts/interop.py <host> <porta>` (ver `scripts/README.md`).
+Correr: `python3 scripts/interop.py <host> <porta>` (ver `scripts/README.md`),
+ou dentro do pytest: `python3 -m pytest tests/system/test_interop.py`
+(o nosso servidor) ou com `--host <ip> --port <p>` (o de outro grupo).
 
 Formato:
 
@@ -24,7 +26,9 @@ Desde o M3 (o 409 e o `PRIV` precisam de dois clientes):
 
 - `a>`, `b<`, ... — a letra diz **que ligação**. Cada uma abre na primeira vez
   que aparece, pela ordem do cenário. Sem letra é a ligação por omissão.
-- `< CLOSED` — espera que o servidor feche essa ligação (`QUIT`).
+- `< CLOSED` — espera que o servidor feche essa ligação (`QUIT`). Os `EVENT`
+  que ainda chegarem antes do fecho são saltados (M4: um aviso de outra
+  ligação pode cruzar-se com o `QUIT`).
 - Quando se espera algo que **não** é um `EVENT`, os `EVENT` que aparecerem
   pelo caminho são saltados: quem recebe os avisos de entrada e saída é
   semântica de cada grupo (D10) e não deve fazer falhar um cenário de `PRIV`.

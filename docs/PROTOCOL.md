@@ -1,4 +1,4 @@
-# Chat Protocol — v0.7
+# Chat Protocol — v0.8
 
 Shared specification for interoperability between groups (IF 2026/27).
 Message names and fields come from the course slides (slide 124) and are
@@ -143,7 +143,7 @@ accepted?) and, optionally, after `QUIT`.
 | `PRIV` to oneself | `OK`, then the `CHAT`, once. | PROPOSAL |
 | A request (`MSG`, `PRIV`, `LIST`) before a successful `NICK` | `ERROR 401 "nick required"`. The connection stays open. | AGREED |
 | `QUIT` before a successful `NICK` | Allowed: `OK`, then close. Leaving must always be possible. No `EVENT` (nobody knew the client). | PROPOSAL |
-| Does `QUIT` get an `OK` before the server closes? | **Yes**, then the server closes (FIN right after the `OK`). Anything sent after the `QUIT` is ignored. Clients should also cope with a server that closes without the `OK`. | AGREED |
+| Does `QUIT` get an `OK` before the server closes? | **Yes**, then the server closes (FIN right after the `OK`). Anything sent after the `QUIT` is ignored. An `EVENT` caused by another connection at the same instant may still arrive between the `OK` and the close. Clients should also cope with a server that closes without the `OK`. | AGREED |
 | `NICK` already used by someone connected | `ERROR 409 "nick taken"`. The connection stays open and the client may try another nick. | (slides) for 409; staying open AGREED |
 | Are nicks case-sensitive? | **No, for uniqueness:** `Ana`, `ana` and `ANA` are the same nick (ASCII letters only; bytes ≥ 0x80 compare exactly). Kept and shown as typed. The same comparison finds the recipient of a `PRIV`. | PROPOSAL (group 1 is case-sensitive — harmless: it only changes which nicks a server allows) |
 | `NICK` after a successful `NICK` | `ERROR 400` (no nick change). | AGREED |
@@ -159,6 +159,9 @@ accepted?) and, optionally, after `QUIT`.
 | Does leaving before a successful `NICK` produce an `EVENT`? | **No.** Nobody knew that client was there. | PROPOSAL |
 | What if a client stops reading (suspended laptop, `Ctrl+Z`)? | Each message the server sends must be fully accepted within **5 s**; otherwise that client is disconnected (the others get `"<nick> left"`). The mechanism and the value are each server's choice — what matters is that one stuck client never freezes the chat (slide 125). Group 1 uses a send queue (1 MiB / 1000 messages). | (slides): something must exist |
 | Server full | `ERROR 503 "server full"`, then the server closes. Our server accepts up to 64 clients. | PROPOSAL |
+| Idle connections (M4) | No **message** (complete line) for **300 s** → `ERROR 408 "idle timeout"` and close. Before a successful `NICK` the limit is **30 s from connecting**, not renewed by refused lines → `408 "nick timeout"`. **A client whose user is only reading must send something** before 300 s: ours sends a `LIST` every 120 s without sending anything else, and hides that `USERS` (no new message type needed). | AGREED (g1: 300 s, 408) / PROPOSAL (30 s, keepalive with `LIST`) |
+| Server shutdown (Ctrl+C) (M4) | Every connection (also those without a `NICK`) receives `EVENT "server shutting down"`, then the server closes it. No `"<nick> left"` is sent. | PROPOSAL |
+| How the server closes (M4) | Whenever the **server** closes (`QUIT`, 408, 413, 503, shutdown) it sends its last line, then FIN, and reads and discards whatever the client still sends until the client closes (max. 2 s). So the last line is never lost to a TCP reset. | PROPOSAL (needs no agreement: only our side changes) |
 
 Rule of thumb: **strict when sending, tolerant when receiving.** A receiver never
 crashes because of what a peer sent; a server answers with `ERROR` and carries on.
@@ -181,7 +184,7 @@ Errors never change the state, except a line over 64 KiB (413), which closes.
 
 | Code | Reason(s) | When | Status |
 |------|-----------|------|--------|
-| 400 | `invalid JSON` | not JSON, not an object, trailing data, embedded `\0` | AGREED (code) |
+| 400 | `invalid JSON` | not JSON, not an object, trailing data, embedded `\0`, **bytes that are not valid UTF-8** (RFC 8259 §8.1) | AGREED (code) |
 | 400 | `invalid field` | missing field, wrong JSON type, outside the limits of §3.1, empty `text` | AGREED (code) |
 | 400 | `text too long` | `text` of a `MSG`/`PRIV` over 4096 bytes; the connection stays open | AGREED |
 | 400 | `unknown type` | `type` is not one of the ten message types | AGREED (code) |
@@ -189,6 +192,7 @@ Errors never change the state, except a line over 64 KiB (413), which closes.
 | 400 | `nick already set` | second `NICK` on the same connection | AGREED (code) |
 | 401 | `nick required` | `MSG`, `PRIV` or `LIST` before a successful `NICK` | AGREED |
 | 404 | `no such nick` | `PRIV` to a nick that is not in the chat | AGREED |
+| 408 | `idle timeout` / `nick timeout` | no message for 300 s / no successful `NICK` within 30 s of connecting; the server then **closes** | AGREED (g1: 408, 300 s) / PROPOSAL (30 s) |
 | 409 | `nick taken` | `NICK` already in use | **(slides)** (code and reason) |
 | 413 | `line too long` | line over 64 KiB; the server then **closes** | AGREED |
 | 503 | `server full` | no room for another client; the server closes after sending it | PROPOSAL |
@@ -199,10 +203,10 @@ between implementations (our conformance scenarios compare codes, plus the
 nick); the others are shown to the user.
 
 The codes follow the HTTP meanings (400 Bad Request, 401 Unauthorized,
-404 Not Found, 409 Conflict, 413 Content Too Large, 503 Service Unavailable).
-The distinction agreed with group 1: **413 = the connection is no longer
-usable and is closed; 400 = request refused, carry on.** (408 for an idle
-timeout is planned for M4 — `DECISIONS.md`, section D.)
+404 Not Found, 408 Request Timeout, 409 Conflict, 413 Content Too Large,
+503 Service Unavailable). The distinction agreed with group 1: **413 = the
+connection is no longer usable and is closed; 400 = request refused, carry
+on.** 408 and 503 also close.
 
 ## 6. Example sessions
 
@@ -302,11 +306,31 @@ Line too long — the server closes after the error:
   [connection closed]
 ```
 
-(If the client keeps sending after the limit, the server closes with unread
-bytes and the kernel may send a RST that swallows the 413 — a known problem,
-for M4.)
+(The rest of the line is read and discarded before the server closes, so the
+413 always arrives — M4.)
+
+Idle and shutdown (M4):
+
+```
+> {"type":"NICK","nick":"ana"}
+< {"type":"OK"}
+< {"type":"EVENT","text":"welcome, ana! commands: /list, /msg <nick> <text>, /quit"}
+  [300 s without sending anything]
+< {"type":"ERROR","code":408,"reason":"idle timeout"}
+  [connection closed]
+
+  [another connection, when the server is stopped with Ctrl+C]
+< {"type":"EVENT","text":"server shutting down"}
+  [connection closed]
+```
 
 ## Changelog
+
+- v0.8 — M4: `ERROR 408` (`idle timeout` after 300 s without a message, as
+  group 1; `nick timeout` 30 s after connecting without a `NICK`); clients
+  that only read should send a `LIST` before 300 s; `EVENT "server shutting
+  down"` before the server closes on Ctrl+C; bytes that are not valid UTF-8
+  → `400 "invalid JSON"`; the server never loses its last line to a reset.
 
 - v0.7 — fixes after the first cross-test: a welcome `EVENT` with the
   commands, only to the client that joined, right after the `OK` to `NICK`

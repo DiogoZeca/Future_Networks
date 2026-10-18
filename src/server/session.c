@@ -217,3 +217,20 @@ int session_leave(const struct session *s, struct msg *out)
     fill_event(out, s->nick, "left");
     return 1;
 }
+
+size_t session_timeout(const struct session *s, struct sess_out *out)
+{
+    /* Quem nunca fez NICK não esteve "inativo": nunca chegou a entrar. O
+     * reason diz qual dos dois prazos acabou; o código é o mesmo (408). */
+    return only_error(out, 408, s->state == SESS_READY ? SESS_R_IDLE
+                                                       : SESS_R_NICK_TIMEOUT);
+}
+
+size_t session_shutdown(struct sess_out *out)
+{
+    memset(out, 0, sizeof *out);
+    out->dest     = SESS_SELF;
+    out->msg.type = MT_EVENT;
+    snprintf(out->msg.text, sizeof out->msg.text, "%s", SESS_EV_SHUTDOWN);
+    return 1;
+}

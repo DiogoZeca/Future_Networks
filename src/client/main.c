@@ -81,7 +81,25 @@
  *   - O servidor manda boas-vindas a quem entra (D22): é um EVENT, e
  *     mostra-se como os outros ("* welcome, ana! ...").
  *
- * Uso: ./bin/client <host> [porta] [nick]   (sem nick, é pedido ao arrancar)
+ * O QUE MUDOU NO M4
+ * ----------------
+ *   - Keepalive (D2): o servidor desliga quem não manda nada durante 300 s
+ *     (408, D23). Um utilizador pode estar só a ler muito mais do que isso.
+ *     Por isso, se o cliente não enviou nada há KEEPALIVE_S (120 s), manda
+ *     um LIST "silencioso" — sem tipos novos, que os outros servidores não
+ *     conheceriam — e não mostra o USERS que vem de volta.
+ *   - Servidor morto: se um desses LIST ficar sem resposta durante mais
+ *     KEEPALIVE_S, o servidor (ou a rede) desapareceu sem FIN nem RST — a
+ *     mesma "morte silenciosa" que o idle timeout apanha do lado do servidor.
+ *     O cliente avisa e termina, em vez de ficar à espera para sempre.
+ *   - Agora há duas threads a escrever no socket (a principal e a do
+ *     keepalive): o send_msg() passou a ter um lock (send_lock), como o
+ *     wlock de cada cliente no servidor.
+ *   - Ctrl+C (e SIGTERM/SIGHUP): sai como o /quit — manda QUIT e espera o
+ *     fecho. Um segundo Ctrl+C termina logo (term.c).
+ *
+ * Uso: ./bin/client [-k segundos] <host> [porta] [nick]
+ *   -k  keepalive (por omissão 120; 0 desliga)   sem nick, é pedido ao arrancar
  */
 #include "framing.h"
 #include "net.h"
@@ -96,10 +114,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/time.h>
+#include <time.h>
 #include <unistd.h>
 
 #define DEFAULT_PORT     "5000"
 #define REPLY_TIMEOUT_S  5          /* só para a resposta ao NICK */
+#define KEEPALIVE_S      120        /* M4: bem abaixo dos 300 s do servidor */
 
 /* Estado da ligação: um rxbuf, como cada ligação no servidor. */
 static struct rxbuf rx;
@@ -159,6 +179,8 @@ static int read_line(int fd, char *line, size_t *len)
  *
  * Os OK não se mostram (revisão do M3): chegam a cada pedido aceite e não
  * dizem nada ao utilizador. Quem precisa de um (do_nick) olha para *m. */
+static int users_is_silent(void);         /* M4, mais abaixo */
+
 static void show_line(const char *line, size_t len, struct msg *m)
 {
     struct proto_err err;
@@ -181,12 +203,58 @@ static void show_line(const char *line, size_t len, struct msg *m)
     }
     if (m->type == MT_OK)
         return;
+    if (m->type == MT_USERS && users_is_silent())
+        return;                             /* resposta a um keepalive (M4) */
     ui_format(m, text, sizeof text);
     term_out(stdout, "%s", text);
 }
 
-/* Codifica e envia. -1 = sair. */
-static int send_msg(int fd, const struct msg *m)
+/* ---- M4: o keepalive e os LIST pendentes -------------------------------
+ *
+ * Cada LIST enviado espera um USERS, e os USERS chegam pela ordem dos LIST
+ * (uma ligação TCP, um servidor que responde por ordem). Uma fila guarda, por
+ * cada LIST ainda sem resposta, se foi do utilizador (mostrar o USERS) ou do
+ * keepalive (não mostrar). Sem a fila, um /list do utilizador logo a seguir a
+ * um keepalive podia ficar escondido no lugar do outro. */
+#define PENDING_MAX 32
+
+static pthread_mutex_t lists_lock = PTHREAD_MUTEX_INITIALIZER;
+static unsigned char   pending[PENDING_MAX];  /* 1 = silencioso */
+static size_t          pending_head = 0, pending_n = 0;
+static long            ka_since     = 0;      /* ms do keepalive por responder (0 = nenhum) */
+
+/* Duas threads escrevem no socket (a principal e a do keepalive). */
+static pthread_mutex_t send_lock = PTHREAD_MUTEX_INITIALIZER;
+static long            last_sent = 0;         /* ms do último envio (send_lock) */
+
+static long keepalive_ms = KEEPALIVE_S * 1000L;
+
+static long now_ms(void)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (long)t.tv_sec * 1000 + t.tv_nsec / 1000000;
+}
+
+/* Chegou um USERS: era a resposta a um LIST silencioso? (Tira-o da fila.) */
+static int users_is_silent(void)
+{
+    pthread_mutex_lock(&lists_lock);
+    int silent = 0;
+    if (pending_n > 0) {
+        silent = pending[pending_head];
+        pending_head = (pending_head + 1) % PENDING_MAX;
+        pending_n--;
+        if (silent)
+            ka_since = 0;                     /* o servidor está vivo */
+    }
+    pthread_mutex_unlock(&lists_lock);
+    return silent;
+}
+
+/* Codifica e envia, com o send_lock JÁ agarrado. Um LIST entra na fila ANTES
+ * de sair (a resposta não pode chegar antes de ele lá estar). -1 = sair. */
+static int send_msg_locked(int fd, const struct msg *m, int silent)
 {
     char   line[PROTO_LINE_BUF];
     size_t len;
@@ -195,11 +263,77 @@ static int send_msg(int fd, const struct msg *m)
         term_out(stderr, "[client] BUG: mensagem nao codificavel");
         return -1;
     }
+    if (m->type == MT_LIST) {
+        pthread_mutex_lock(&lists_lock);
+        if (pending_n < PENDING_MAX) {
+            pending[(pending_head + pending_n) % PENDING_MAX] = (unsigned char)silent;
+            pending_n++;
+            if (silent)
+                ka_since = now_ms();
+        }
+        pthread_mutex_unlock(&lists_lock);
+    }
+    last_sent = now_ms();
     if (send_all(fd, line, len) < 0) {
         term_out(stderr, "send: %s", strerror(errno));
         return -1;
     }
     return 0;
+}
+
+static int send_msg(int fd, const struct msg *m)
+{
+    pthread_mutex_lock(&send_lock);
+    int rc = send_msg_locked(fd, m, 0);
+    pthread_mutex_unlock(&send_lock);
+    return rc;
+}
+
+/* A thread do keepalive. Acorda de vez em quando (ou quando se sai) e:
+ *   - se um LIST silencioso está por responder há keepalive_ms: o servidor
+ *     morreu sem avisar → avisar e terminar;
+ *   - se não se envia nada há keepalive_ms: mandar um LIST silencioso. */
+static pthread_mutex_t ka_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t  ka_cond;
+
+static void *keepalive_thread(void *arg)
+{
+    int  fd   = *(int *)arg;
+    long step = keepalive_ms / 4 < 1000 ? keepalive_ms / 4 : 1000;
+
+    pthread_mutex_lock(&ka_lock);
+    while (!quitting) {
+        struct timespec until;
+        clock_gettime(CLOCK_MONOTONIC, &until);
+        until.tv_sec  += step / 1000;
+        until.tv_nsec += (step % 1000) * 1000000L;
+        if (until.tv_nsec >= 1000000000L) {
+            until.tv_sec++;
+            until.tv_nsec -= 1000000000L;
+        }
+        pthread_cond_timedwait(&ka_cond, &ka_lock, &until);
+        if (quitting)
+            break;
+
+        long now = now_ms();
+        pthread_mutex_lock(&lists_lock);
+        long since = ka_since;
+        pthread_mutex_unlock(&lists_lock);
+        if (since != 0 && now - since >= keepalive_ms) {
+            term_out(stderr, "[client] o servidor nao responde ha %ld s: a sair",
+                     (now - since) / 1000);
+            term_exit(EXIT_FAILURE);          /* NÃO exit(): ver term.h */
+        }
+
+        pthread_mutex_lock(&send_lock);
+        if (!quitting && since == 0 && now - last_sent >= keepalive_ms) {
+            struct msg l = { .type = MT_LIST };
+            send_msg_locked(fd, &l, 1);       /* se falhar, o leitor vê o fecho */
+        }
+        pthread_mutex_unlock(&send_lock);
+    }
+    pthread_mutex_unlock(&ka_lock);
+    return NULL;
 }
 
 /* ---- Thread de leitura -------------------------------------------------- */
@@ -208,8 +342,9 @@ static int send_msg(int fd, const struct msg *m)
  *
  * Se o servidor cair enquanto estamos à espera do teclado, a thread principal
  * está presa no read() (ou no fgets()) do teclado e não há forma portável de
- * a interromper — por isso esta thread avisa e termina o processo (o atexit
- * repõe o terminal). Quando somos NÓS a sair (Ctrl+D), o
+ * a interromper — por isso esta thread avisa e termina o processo, com
+ * term_exit() e não exit() (term.h: com o fgets() à espera, o exit() de uma
+ * glibc recente bloqueava para sempre). Quando somos NÓS a sair (Ctrl+D), o
  * fecho é esperado: basta retornar e deixar o join acontecer. */
 static void *reader_thread(void *arg)
 {
@@ -231,7 +366,7 @@ static void *reader_thread(void *arg)
 
         if (r == -2)
             term_out(stderr, "[client] o servidor fechou a ligacao");
-        exit(r == -2 ? EXIT_SUCCESS : EXIT_FAILURE);   /* o atexit repõe o terminal */
+        term_exit(r == -2 ? EXIT_SUCCESS : EXIT_FAILURE);   /* NÃO exit(): ver term.h */
     }
 }
 
@@ -313,8 +448,25 @@ again:
 
 int main(int argc, char *argv[])
 {
+    int opt;
+    while ((opt = getopt(argc, argv, "k:h")) != -1) {
+        if (opt == 'k') {
+            char *end;
+            long  v = strtol(optarg, &end, 10);
+            if (*optarg == '\0' || *end != '\0' || v < 0 || v > 86400) {
+                fprintf(stderr, "-k: segundos entre 0 e 86400\n");
+                return EXIT_FAILURE;
+            }
+            keepalive_ms = v * 1000;
+        } else {
+            fprintf(stderr, "uso: %s [-k segundos] <host> [porta] [nick]\n", argv[0]);
+            return opt == 'h' ? EXIT_SUCCESS : EXIT_FAILURE;
+        }
+    }
+    argc -= optind - 1;                     /* argv[1] passa a ser o host */
+    argv += optind - 1;
     if (argc < 2) {
-        fprintf(stderr, "uso: %s <host> [porta] [nick]\n", argv[0]);
+        fprintf(stderr, "uso: %s [-k segundos] <host> [porta] [nick]\n", argv[0]);
         return EXIT_FAILURE;
     }
     const char *host = argv[1];
@@ -368,9 +520,22 @@ int main(int argc, char *argv[])
      *    leitura nasce com os sinais do terminal bloqueados (herda a máscara):
      *    assim chegam sempre à thread principal, que é a que está no read()
      *    do teclado e sabe redesenhar. */
-    pthread_t reader;
+    pthread_t reader, keeper;
+    int       keeping = 0;
+    pthread_condattr_t ca;
+    pthread_condattr_init(&ca);
+    pthread_condattr_setclock(&ca, CLOCK_MONOTONIC);
+    pthread_cond_init(&ka_cond, &ca);
+    pthread_condattr_destroy(&ca);
+
+    pthread_mutex_lock(&send_lock);
+    last_sent = now_ms();                   /* o NICK acabou de sair */
+    pthread_mutex_unlock(&send_lock);
+
     term_hold_signals();
     int rc = pthread_create(&reader, NULL, reader_thread, &fd);
+    if (rc == 0 && keepalive_ms > 0)        /* M4: -k 0 desliga */
+        keeping = pthread_create(&keeper, NULL, keepalive_thread, &fd) == 0;
     term_release_signals();
     if (rc != 0) {
         term_stop();
@@ -444,7 +609,15 @@ int main(int argc, char *argv[])
      *    (FIN): mesmo um servidor que ignore o QUIT vê recv()==0 e fecha. A
      *    thread de leitura mostra o que ainda chegar e termina ao ver o
      *    fecho. */
+    if (term_quit_requested())
+        term_out(stderr, "[client] Ctrl+C: a sair (QUIT)");
     quitting = 1;
+    if (keeping) {                          /* parar o keepalive antes do QUIT */
+        pthread_mutex_lock(&ka_lock);
+        pthread_cond_signal(&ka_cond);
+        pthread_mutex_unlock(&ka_lock);
+        pthread_join(keeper, NULL);
+    }
     /* O terminal volta ao normal JÁ: o que ainda chegar até o servidor fechar
      * aparece sem prompt (já não se está a escrever nada). */
     term_stop();

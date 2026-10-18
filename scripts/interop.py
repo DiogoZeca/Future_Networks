@@ -31,6 +31,8 @@ Duas regras extra (M3):
   - A espera de um tipo que NAO seja EVENT salta os EVENT que aparecerem
     pelo caminho. Quem recebe os "x joined"/"x left" e semantica de cada
     grupo (D10): um cenario de PRIV nao deve falhar por causa disso.
+  - (M4) A espera do fecho ("< CLOSED") tambem salta EVENTs: um aviso de
+    outra ligacao pode chegar entre o OK ao QUIT e o fecho.
   - (Correcao do M3) A espera de um EVENT salta tambem os EVENT com OUTRO
     texto: as boas-vindas a quem entra (D22, nossas) ou outros avisos que um
     grupo decida mandar. Se o EVENT esperado nunca chegar, o erro mostra os
@@ -120,6 +122,15 @@ def expect(reader, want, who):
         if want == CLOSED:
             if got_raw is None:
                 return None
+            # Um EVENT ainda pode chegar entre o OK ao QUIT e o fecho: outra
+            # thread do servidor (ex.: o "ana joined" de quem entrou no mesmo
+            # instante) pode escrever-nos antes de sairmos da lista. Saltar,
+            # como nas outras esperas; qualquer outra coisa e erro.
+            try:
+                if json.loads(got_raw).get("type") == "EVENT":
+                    continue
+            except (ValueError, AttributeError):
+                pass
             return f"{who}esperava o fecho da ligacao\n        recebeu {got_raw}"
         if got_raw is None:
             return (f"{who}esperava {json.dumps(want, ensure_ascii=False)}\n"
