@@ -262,6 +262,11 @@ static int utf8_valid(const unsigned char *s, size_t len)
     return 1;
 }
 
+int proto_utf8_valid(const char *s, size_t len)
+{
+    return utf8_valid((const unsigned char *)s, len);
+}
+
 int proto_parse(const char *line, size_t len, struct msg *out, struct proto_err *err)
 {
     memset(out, 0, sizeof *out);            /* nunca meio preenchido */

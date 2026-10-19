@@ -218,6 +218,12 @@ int proto_nick_cmp(const char *a, const char *b);
  * -1 se o nick for inválido ou já houver PROTO_USERS_MAX. */
 int proto_users_add(struct msg *m, const char *nick);
 
+/* Os len bytes são UTF-8 válido (estrito: sem overlong, sem surrogates, nada
+ * acima de U+10FFFF)? 1 = sim. É a verificação que o proto_parse() faz a cada
+ * linha (M4, P38); exposta no M5 para os datagramas da descoberta (disco.c)
+ * usarem a MESMA regra. */
+int proto_utf8_valid(const char *s, size_t len);
+
 /* Nome do tipo no fio ("NICK", ...), ou "?" — para logs. */
 const char *proto_type_name(enum msg_type t);
 
