@@ -6,7 +6,8 @@ Cada entrada tem um **Estado**. Os resolvidos estão explicados em detalhe
 (evidência → solução → prova) em
 [`milestones/M1.md` — "Problemas do M0 resolvidos no M1"](milestones/M1.md#problemas-do-m0-resolvidos-no-m1) e
 [`milestones/M2.md` — "Problemas do M1 resolvidos no M2"](milestones/M2.md#problemas-do-m1-resolvidos-no-m2) e
-[`milestones/M3.md` — "Problemas resolvidos no M3"](milestones/M3.md#problemas-resolvidos-no-m3).
+[`milestones/M3.md` — "Problemas resolvidos no M3"](milestones/M3.md#problemas-resolvidos-no-m3) e
+[`milestones/M5.md` — "Problemas resolvidos no M5"](milestones/M5.md#problemas-resolvidos-no-m5) (descoberta UDP).
 
 ---
 
@@ -82,6 +83,18 @@ Observada em 2026-10-18 (detalhe em `milestones/M4.md`, P38–P45):
 | O cliente quando o servidor fecha, com o stdin num pipe aberto, no Ubuntu 24.04 (glibc 2.39) | **nunca terminava**: o `exit()` da thread de leitura esperava pelo lock do `stdin`, que o `fgets()` da principal tinha (no 22.04 passava) | `term_exit()`: `_exit()` depois de despejar à mão (P46) |
 
 ---
+## 0.5 Evidência medida no M5
+
+Observada em 2026-10-19, na loopback (detalhe em `milestones/M5.md`, P50–P61):
+
+| Experiência | Resultado observado |
+|---|---|
+| `sendto()` para `127.255.255.255` sem `SO_BROADCAST` | `EACCES` — o kernel obriga a pedir o broadcast |
+| `sendto()` para `255.255.255.255` numa máquina sem rede | `ENETUNREACH`; o `127.255.255.255` funciona (é a loopback) |
+| Dois sockets com `SO_REUSEADDR` na mesma porta UDP | um **broadcast** chega aos **dois**; um **unicast** só a **um** (o último ligado) |
+| Um 3.º socket sem `SO_REUSEADDR` nessa porta (ou ao contrário) | `EADDRINUSE` |
+| Datagrama de 612 bytes lido com um buffer de 512 | o `recvfrom()` devolve 512 como se fosse tudo; só o `MSG_TRUNC` do `recvmsg()` o diz; o resto perde-se |
+| 200 `DISCOVER` seguidos ao nosso servidor | 200 respostas; o chat continua a aceitar ligações |
 
 ## 1. TCP é um byte stream, não um stream de mensagens
 
@@ -214,7 +227,8 @@ desligar?"*. São quatro cenários distintos, com sintomas diferentes.
 
 - **Sintoma:** funciona em `localhost`, falha entre máquinas. O broadcast UDP é o que falha mais.
 - **Como evitar:** testar cedo entre duas máquinas reais, não só em loopback. No dia da interoperabilidade, ter à mão o comando para abrir a porta e saber qual é a firewall da máquina (`ufw`, `firewalld`, Windows Defender).
-- **Estado:** `Por Resolver` - **M5**. **Testar antes do dia**, não no dia.
+- **E a firewall do cliente:** a resposta a um `DISCOVER` vem do IP do servidor, não do endereço de broadcast para onde foi o pedido — o *connection tracking* não a reconhece como resposta, e uma firewall que recusa o que entra deita-a fora. Com a `ufw`: no servidor `sudo ufw allow 5001/udp`; no cliente `sudo ufw allow proto udp from any port 5001 to any` (`milestones/M5.md`, nota 13).
+- **Estado:** `Resolvido do nosso lado` - **M5**: quando ninguém responde, o cliente diz as causas prováveis com os dois comandos do `ufw` e sugere `./bin/client <ip>`; `scripts/discover.py` mostra o que chega em bruto (separa "a rede não deixa" de "o formato é outro"). **Por fazer:** o teste entre duas máquinas com as firewalls ligadas (`milestones/M5.md`, "Teste numa rede a sério", passos 6 e 6b). **Testar antes do dia**, não no dia.
 
 ### 4.3 IPv4 vs IPv6 - assimetria no nosso código
 
@@ -230,7 +244,7 @@ desligar?"*. São quatro cenários distintos, com sintomas diferentes.
 - **Sintoma:** o IP que o servidor anuncia no `DISCOVER` não é alcançável.
 - **Porquê:** máquina com várias interfaces (Wi-Fi + Ethernet + docker0 + VPN), ou atrás de NAT. O "meu IP" não é uma coisa só.
 - **Como evitar:** no M5, responder ao broadcast a partir do endereço **da interface onde o pedido chegou**, não de um IP escolhido a priori. Melhor ainda: o cliente usa o IP de origem do pacote UDP de resposta e ignora qualquer IP que venha no payload.
-- **Estado:** `Por Resolver` - **M5**.
+- **Estado:** `Resolvido` - **M5** (P50): a resposta não leva IP nenhum; o cliente usa o **IP de origem** do datagrama de resposta (chegou até ele, logo é alcançável) e ignora um `ip`/`host` que venha na mensagem. E o pedido vai também para o broadcast de cada interface, não só para o `255.255.255.255` (P51). Prova: `test_discovery.py` (um `"ip":"10.9.9.9"` falso é ignorado); mutação 38.
 
 ---
 
@@ -306,6 +320,7 @@ Relevante porque os outros grupos não usam todos Linux.
 | `QUIT` tem `OK`? | **Proposta nossa (D17): sim**, e o servidor fecha; também antes do `NICK`. O nosso cliente aguenta um servidor que feche sem `OK` |
 | `USERS` inclui quem pede? Que ordem? | **Proposta nossa (D16):** sim, alfabética. O `interop.py` compara a lista exata no cenário 10: contra outro grupo pode falhar só pela ordem |
 | Um cenário de interop falha só porque o outro grupo manda `EVENT` a mais | O `interop.py` salta os `EVENT` quando espera outra coisa (M3) |
+| Descoberta (M5): porta UDP, formato do pedido, `tcp_port` ou `port`, resposta só a quem pergunta, IP de origem, broadcast ou multicast | Se diferirem, os grupos simplesmente **não se encontram** — sem erro nenhum. Os pontos M5-1 a M5-11 estão no [`DECISIONS.md`](DECISIONS.md), secção M5. O nosso cliente já lê `tcp_port` e `port` e ignora um `ip`; o servidor aceita o pedido em JSON e em texto. `scripts/discover.py` mostra o formato de cada grupo |
 | Testar só contra nós próprios | Os cenários em `tests/interop/` são texto puro e correm contra qualquer servidor com `scripts/interop.py` (3 modos de envio). `scripts/probe_client.py` mostra como o nosso cliente reage a servidores que decidiram diferente |
 
 **Regra prática:** ser **estrito a enviar, tolerante a receber**. Nunca rebentar por causa do que o peer mandou - responder `ERROR` e continuar.
@@ -323,7 +338,7 @@ Relevante porque os outros grupos não usam todos Linux.
 - [ ] Um `nc` calado → `408` ao fim de 30 s (sem `NICK`) ou 300 s (M4)
 - [ ] Enviar lixo (`echo "nao e json" | nc host porta`) → `ERROR`, não crash
 - [ ] Enviar uma linha de 1 MB sem `\n` → `ERROR`, não overflow
-- [ ] Testar entre **duas máquinas**, não só em loopback
+- [ ] Testar entre **duas máquinas**, não só em loopback — incluindo a descoberta (`./bin/client` sem endereço) com as firewalls ligadas (M5)
 - [ ] Testar contra o servidor de outro grupo (e preencher o registo no `DECISIONS.md`)
 - [ ] Dois clientes com o mesmo nick ao mesmo tempo → um `OK`, um `409` (M3+; `test_concurrency.py`)
 - [ ] Notas do milestone preenchidas em `docs/milestones/`

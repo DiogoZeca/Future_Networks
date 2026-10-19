@@ -510,9 +510,11 @@ static int find_server(const struct discover_opts *o, char *ip, size_t ipcap,
                 "  - nao ha nenhum servidor a correr nesta rede;\n"
                 "  - a firewall do servidor bloqueia a porta UDP %d "
                 "(Ubuntu: sudo ufw allow %d/udp);\n"
+                "  - a firewall DESTA maquina bloqueia as respostas, que nao sao vistas como\n"
+                "    resposta a um broadcast (Ubuntu: sudo ufw allow proto udp from any port %d to any);\n"
                 "  - a rede nao deixa passar broadcasts (Wi-Fi com isolamento de clientes).\n"
                 "  Se souberes o endereco: %s <ip> [porta] [nick]\n",
-                o->udp_port, o->udp_port, "./bin/client");
+                o->udp_port, o->udp_port, o->udp_port, "./bin/client");
         return -1;
     }
 

@@ -1,4 +1,4 @@
-# Chat Protocol — v0.8
+# Chat Protocol — v0.9
 
 Shared specification for interoperability between groups (IF 2026/27).
 Message names and fields come from the course slides (slide 124) and are
@@ -19,6 +19,7 @@ against any server with `python3 scripts/interop.py <host> <port>`.
 ## 1. Transport
 
 - TCP. Default port: **AGREED** `5000` (group 1 uses 5000 too).
+- Server discovery (M5): UDP broadcast, port `5001` — see §7.
 - **(slides, slide 85)** IPv4 and IPv6: *"Use getaddrinfo() and
   sockaddr_storage for IPv4 / IPv6 portability"*. Our server listens on both
   in a single dual-stack socket (`::` with `IPV6_V6ONLY=0`; on a machine
@@ -324,7 +325,89 @@ Idle and shutdown (M4):
   [connection closed]
 ```
 
+## 7. Discovery (M5)
+
+**(slides, slide 123)** *"The server answers a UDP broadcast (DISCOVER) with
+its TCP port; the client finds servers on the LAN with no address typed in."*
+Everything else in this section is ours (PROPOSAL) or taken from what group 1
+told us (marked *as group 1*) — **none of it has been tested between groups
+yet**; the open points are listed in `DECISIONS.md`, section "M5".
+
+### 7.1 Transport
+
+- UDP over **IPv4**, server port **`5001`** (*as group 1*; PROPOSAL until
+  tested). IPv6 has no broadcast (the equivalent would be multicast to
+  `ff02::1`): out of scope.
+- One message per **datagram** — no framing, no `\n` needed. A datagram
+  arrives whole or not at all.
+- Maximum datagram: **512 bytes**, both ways. Larger datagrams are ignored.
+- Datagrams MUST be valid UTF-8 JSON (RFC 8259 §8.1), like the TCP lines.
+
+### 7.2 Request (client → broadcast)
+
+```
+{"type":"DISCOVER"}
+```
+
+- Sent to `255.255.255.255:5001` and/or the directed broadcast of each
+  interface (e.g. `192.168.1.255:5001`), from any (ephemeral) port.
+- Our client sends exactly these 19 bytes, without `\n`, **3 times** over
+  1.5 s (UDP loses packets silently), and waits the whole 1.5 s.
+- A server MUST also accept: a trailing `\n` / `\r\n`, whitespace around
+  the object, extra fields, and the plain text `DISCOVER` (PROPOSAL, as
+  tolerance). `type` is case-sensitive: `discover` is not a request.
+
+### 7.3 Response (server → the requester only)
+
+```
+{"type":"SERVER","tcp_port":5000,"name":"diogolap","users":3}
+```
+
+| Field | Rule | Status |
+|---|---|---|
+| `type` | `"SERVER"` | *as group 1* |
+| `tcp_port` | integer 1–65535: the TCP port of the chat (§1) | *as group 1* — the slide's *"its TCP port"* |
+| `name` | string, 1–64 bytes, no control characters: a human name for the server (our default: the hostname) | PROPOSAL (optional) |
+| `users` | integer ≥ 0: how many clients are **in the chat** (completed `NICK`) | PROPOSAL (optional) |
+
+- Sent **unicast** to the source address and port of the request — never by
+  broadcast.
+- Our server ends it with `\n`; receivers MUST accept it with or without.
+- **The server's address is the source IP of the response datagram.** The
+  response carries no IP, and a client MUST ignore any `ip`/`host` field: a
+  server with several interfaces (Wi-Fi, Ethernet, docker0, VPN) cannot know
+  which of its addresses the client can reach; the datagram that reached the
+  client can.
+- A server MUST NOT answer anything that is not a request (other types,
+  invalid JSON, oversized datagrams): no `ERROR` over UDP. Otherwise two
+  servers could answer each other forever, and the server would amplify
+  traffic towards a spoofed address.
+
+### 7.4 What our client accepts (tolerant receiving)
+
+Any JSON object, up to 512 bytes, with `type` absent or `"SERVER"` and the
+port in **`tcp_port`** or, failing that, **`port`** (integer 1–65535).
+`name` and `users` are optional and ignored if malformed; control characters
+in `name` are shown as `?`. Duplicate responses (3 requests × several
+broadcast addresses) are merged by (source IP, port). The list is shown
+sorted (named servers first, by name ignoring case; then IP and port).
+
+### 7.5 Example
+
+```
+client 192.168.1.23:41234  →  255.255.255.255:5001   {"type":"DISCOVER"}
+client 192.168.1.23:41234  →  192.168.1.255:5001     {"type":"DISCOVER"}
+server 192.168.1.10:5001   →  192.168.1.23:41234     {"type":"SERVER","tcp_port":5000,"name":"diogolap","users":3}\n
+client: TCP connect to 192.168.1.10:5000, then NICK as usual (§3)
+```
+
 ## Changelog
+
+- v0.9 — M5: server discovery over UDP (§7): `{"type":"DISCOVER"}` by
+  broadcast to port 5001, answered only to the requester with
+  `{"type":"SERVER","tcp_port":N,"name":...,"users":...}`; the server's
+  address is the source IP of the answer; anything else gets no answer; our
+  client also reads `port`. Not yet tested between groups.
 
 - v0.8 — M4: `ERROR 408` (`idle timeout` after 300 s without a message, as
   group 1; `nick timeout` 30 s after connecting without a `NICK`); clients

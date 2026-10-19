@@ -17,7 +17,7 @@ falta acordar com os outros grupos está em [`docs/DECISIONS.md`](docs/DECISIONS
 | M2 | Vários clientes        | DONE |
 | M3 | Comandos + spec        | DONE (semântica acordada e testada com o grupo 1; faltam mais grupos) |
 | M4 | Robustez e testes      | DONE (idle 408, Ctrl+C limpo, log, pytest) |
-| M5 | Descoberta UDP         | TODO |
+| M5 | Descoberta UDP         | DONE (falta o teste em rede a sério e acertar os pormenores com os grupos) |
 | M6 | Extensão               | TODO |
 
 Notas de cada fase em [`docs/milestones/`](docs/milestones/).
@@ -25,27 +25,33 @@ Notas de cada fase em [`docs/milestones/`](docs/milestones/).
 ## Estrutura
 
 ```
-include/         headers (net.h, framing.h, protocol.h, session.h, roster.h, ui.h, term.h, log.h)
+include/         headers (net.h, framing.h, protocol.h, disco.h, session.h, roster.h, ui.h, term.h,
+                 discover.h, log.h)
 src/common/      código usado por cliente e servidor
   net.c            sockets: criar, ligar, send_all, send_all_timeout (prazo total),
-                   wait_readable (esperar com prazo), linger_drain (fechar sem RST)
+                   wait_readable (esperar com prazo), linger_drain (fechar sem RST);
+                   UDP para a descoberta: udp_bind, broadcast, broadcast_targets
   log.c            o log do servidor: hora, nível, uma linha por evento
   framing.c        bytes <-> linhas (buffer de receção, split em '\n')
   protocol.c       linhas <-> mensagens JSON validadas
+  disco.c          os datagramas da descoberta: DISCOVER, a resposta, a lista (testado à unidade)
 src/server/      servidor
   session.c        máquina de estados por ligação: 409, 404, USERS, QUIT (testada à unidade)
   roster.c         lista de clientes partilhada: lock, refcount, nicks únicos
   main.c           uma thread por cliente; broadcast e PRIV com prazo de envio;
-                   idle timeout (408), Ctrl+C que fecha tudo e sai com 0
+                   idle timeout (408), Ctrl+C que fecha tudo e sai com 0;
+                   responde ao DISCOVER (UDP 5001) no mesmo poll() do accept()
 src/client/      cliente
   ui.c             texto e comandos (/list, /msg, /quit) <-> mensagens; editor de linha (testada à unidade)
   term.c           o terminal: linha de escrita com o nick à frente, sem se misturar com o que chega
+  discover.c       sem endereço: procurar servidores por broadcast UDP e escolher um
   main.c           teclado -> socket, socket -> ecrã, e o keepalive (LIST silencioso)
-tests/unit/      testes framing / log / net / protocol / roster / session / ui (make test)
+tests/unit/      testes disco / framing / log / net / protocol / roster / session / ui (make test)
 tests/system/    servidor e cliente a sério, com pytest (make pytest)
 tests/interop/   cenários em texto, independentes da linguagem (1 ou várias ligações)
 docs/            especificação do protocolo, decisões a acordar e notas por fase
-scripts/         interop.py: os cenários contra qualquer servidor
+scripts/         interop.py: os cenários contra qualquer servidor;
+                 discover.py: quem responde a um DISCOVER na rede, e em que formato
 ```
 
 ## Compilar e correr
@@ -57,10 +63,22 @@ sudo pacman -S cjson            # Arch
 sudo apt install libcjson-dev   # Ubuntu/Debian
 make            # compila para bin/
 ./bin/server 5000               # [-v | -q] [-i inatividade s] [-n prazo do NICK s]
+                                #   [-u porta UDP da descoberta (5001; 0 desliga)] [-N nome]
+./bin/client                    # sem endereço: procura os servidores da rede e escolhe-se um
 ./bin/client <ip> 5000 ana      # o nick é pedido se não for dado; [-k keepalive s]
 make test       # testes unitários (make test SAN=1 com sanitizers)
 make pytest     # testes de sistema (precisa do pytest: sudo apt install python3-pytest)
 ```
+
+**Descoberta (M5).** O servidor responde a um `DISCOVER` por broadcast UDP na
+porta 5001 com a sua porta TCP, o nome (`-N`, por omissão o hostname) e
+quantos estão no chat. O `./bin/client` sem endereço manda o pedido para a
+rede, espera 1,5 s e: um servidor → liga-se logo; vários → mostra-os por ordem
+e pergunta qual; nenhum → explica porquê. Com a firewall ligada (Ubuntu):
+`sudo ufw allow 5001/udp` no servidor e
+`sudo ufw allow proto udp from any port 5001 to any` no cliente. Detalhe em
+[`docs/milestones/M5.md`](docs/milestones/M5.md); o que falta acertar com os
+outros grupos, no [`DECISIONS.md`](docs/DECISIONS.md) (secção M5).
 
 O servidor sai com Ctrl+C: avisa os clientes (`server shutting down`), fecha
 todas as ligações e sai com 0. Quem estiver 300 s sem mandar nada recebe

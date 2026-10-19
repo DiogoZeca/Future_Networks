@@ -4,7 +4,7 @@ What **has to be agreed** with the other groups so that our client works with
 their servers and our server works with their clients — what is already
 agreed, and what does **not** need agreeing because the slides decide it.
 
-- The specification is in [`PROTOCOL.md`](PROTOCOL.md) (v0.8). This file says
+- The specification is in [`PROTOCOL.md`](PROTOCOL.md) (v0.9). This file says
   **what to ask**, what was agreed with whom, and what happens if two groups
   decide differently.
 - Every row has **our position**, implemented and tested. Each decision lives
@@ -22,6 +22,7 @@ agreed, and what does **not** need agreeing because the slides decide it.
 | **B** | Only changes what the user sees (or what our tests compare) | Nice to have |
 | **C** | Internal to our implementation | No (worth mentioning) |
 | **D** | Later milestones (M4–M6): what the slides fix and what is still open | Agree early |
+| **M5** | Discovery: implemented, **not yet tested between groups** — what is still to agree | **Yes** (M5-1 to M5-6 break discovery) |
 
 ### Why the list is short: strict when sending, tolerant when receiving
 
@@ -161,11 +162,58 @@ natural starting point.
 | D2 | M4 | — | keepalive? (slide 124 has no `PING`; a new type would be `unknown type` elsewhere) | **implemented (M4, D25):** no new type — our client sends a `LIST` after 120 s without sending anything and hides the `USERS`; no answer for another 120 s → the server is gone. **Ask:** do your clients send something when the user is only reading? |
 | D3 | M4 | **Ctrl+C shutdown that closes sockets** | are clients told? | **implemented (M4, D24):** `EVENT "server shutting down"` to every connection, then FIN; no `"x left"` |
 | D4 | M4 | **automated tests with pytest** | — (internal) | **implemented:** `tests/system/` (98 tests); `test_interop.py --host <ip> --port <p>` runs our scenarios against another group's server |
-| D5 | M5 | the server answers a **UDP broadcast** called **`DISCOVER`** with **its TCP port** | exact JSON of the request and the reply; UDP port; client wait time | **as group 1:** request `{"type":"DISCOVER"}` (also accept the plain text `DISCOVER`); reply `{"type":"SERVER","tcp_port":5000,…}`; UDP port **5001**; the IP is the packet's **source**, never trusted from a field; accept `{"port":N}` from other groups |
+| D5 | M5 | the server answers a **UDP broadcast** called **`DISCOVER`** with **its TCP port** | exact JSON of the request and the reply; UDP port; client wait time | **implemented (M5, D28–D33), as group 1 told us:** request `{"type":"DISCOVER"}` (also the plain text `DISCOVER`); reply `{"type":"SERVER","tcp_port":5000,"name":…,"users":…}` only to the requester; UDP port **5001**; the IP is the packet's **source**; our client also reads `{"port":N}`. **Not tested between groups yet** — the open points are in the section **M5** below |
 | D6 | M6-A | file transfer with **length-prefixed binary frames** | the header and how it coexists with the JSON lines | to agree between the groups that pick it |
 | D7 | M6-B | **TLS** with `ssl` and a **self-signed certificate** | same port or another? | another port (e.g. `5443`), so clients without TLS do not break; group 1 answers TLS bytes on the normal port with `ERROR 400` and closes |
 | D8 | M6-C | chat rooms with **`/join` and `/leave`** | the message types (not in slide 124) | to agree between the groups that pick it |
 | D9 | M6-D | supervisory node | server-to-server messages | group 1 already links servers (`PEER`, message ids, origin); worth reading before choosing |
+
+---
+
+## M5 — Discovery: what is still to agree
+
+Implemented and tested on our side (`docs/milestones/M5.md`, `PROTOCOL.md`
+§7), with the format group 1 told us they use — but **nobody has found
+another group's server yet, nor been found by another group's client**.
+Same question as always: what breaks if two groups decide differently, and
+what our code already tolerates.
+
+### M5-A — Breaks discovery if groups differ (agree first)
+
+| # | Question | Our position | If groups differ | What our code already tolerates | Where to change |
+|---|---|---|---|---|---|
+| M5-1 | **UDP port** | `5001` (group 1's) | **nobody finds anybody** — the most important point | `-u` on server and client: any port can be tried | `DISCO_PORT_DEFAULT` (`disco.h`) |
+| M5-2 | **The request**: `{"type":"DISCOVER"}`? plain `DISCOVER`? another key (`"cmd"`), other case? | `{"type":"DISCOVER"}`; we also accept the plain text | our server does not answer their client, or theirs does not answer ours | JSON and plain text, with or without `\n` / whitespace | `disco_is_request()` |
+| M5-3 | **Port field in the response**: `tcp_port` or `port`? | we send `tcp_port`; we read both | a client that only reads `port` cannot use our answer | our client reads `tcp_port` and `port` | `disco_build_reply()` — sending **both** would cost one line and break nobody (A4) |
+| M5-4 | Is the response sent **only to the requester** (source IP and port of the request)? | yes | a server that answers by broadcast to port 5001 never reaches our client (it listens on an ephemeral port) | — | — (their side) |
+| M5-5 | Does the client use the **source IP** of the response, or an `ip`/`host` field? | source IP; we send no IP | a client that reads `ip` from the message does not know where to connect with our server | our client ignores their `ip` and works anyway | if a group really needs it: add `"ip"` (M5.md P50 says why it is fragile) |
+| M5-6 | **IPv4 broadcast**, or multicast (`239.x.x.x`, `ff02::1`)? | IPv4 broadcast (the slide) | broadcast and multicast groups never find each other | `-b` takes any IPv4, but we join no multicast group | `discover()`, `udp_bind()` |
+
+### M5-B — Only changes what is shown (nice to agree)
+
+| # | Question | Our position | If groups differ |
+|---|---|---|---|
+| M5-7 | Does the request end in `\n`? | ours does not (19 bytes) | a server comparing exact bytes *with* `\n` would not answer us (that would make it A) |
+| M5-8 | Does the response end in `\n`? | yes | nothing: our client accepts both |
+| M5-9 | `name` and `users` | we send both; optional when receiving | our list shows only `IP:port` for servers that do not send them |
+| M5-10 | Maximum datagram | 512 bytes | a larger response is ignored by our client (`scripts/discover.py` says so) |
+| M5-11 | How long the client waits, how many times it asks | 1.5 s, 3 times | nothing (each client's choice); a server slower than 1.5 s is missed: `-w` |
+
+### How to test with another group (10 minutes)
+
+1. `python3 scripts/discover.py` (and `--plain`) on their network: does their
+   server answer? In what format? What does the verdict say?
+2. `./bin/client` with no address: does it find their server and join?
+3. Their client against our server (`./bin/server -v`): does our log show
+   `descoberta: DISCOVER de <their ip>`? Does their client find us?
+4. Fill in the contact log above; mark each M5-n as AGREED (or what was
+   decided) here and in `PROTOCOL.md` §7.
+
+Firewalls (slide 125): with `ufw` on, the **server** needs
+`sudo ufw allow 5001/udp` and the **client** needs
+`sudo ufw allow proto udp from any port 5001 to any` — the answer comes from the
+server's IP, not from the broadcast address the request went to, so
+connection tracking does not see it as a reply (M5.md, note 13).
 
 ---
 
@@ -183,15 +231,16 @@ For a new group:
 Still to ask group 1: **A7** (`"`/`\` in nicks), **B2** (`QUIT` before `NICK`),
 **B4** (does the connection stay open after a 409?), **B7**, **B11** (503),
 **B14** (the welcome `EVENT`, new after the cross-test), **D2** (keepalive),
-**D3** (the shutdown `EVENT`).
+**D3** (the shutdown `EVENT`), and the discovery: **M5-1 to M5-6** first, then
+M5-7 to M5-11 — and test it with them (above).
 
 ---
 
 ## Message to send to the groups
 
-> Hi! We are the group doing the chat in C (repository Future_Networks). For
-> M3 we have the full protocol implemented and tested (`docs/PROTOCOL.md`,
-> v0.7), already agreed with one group. Most of it is fixed by the slides;
+> Hi! We are the group doing the chat in C (repository Future_Networks). We
+> have the full protocol implemented and tested up to M5 (`docs/PROTOCOL.md`,
+> v0.9), already agreed with one group for M3. Most of it is fixed by the slides;
 > only a few points really need agreeing (`docs/DECISIONS.md`, section A):
 >
 > 1. Which requests get an `OK`? Our reading of *"Last request accepted"*: every accepted request (`NICK`, `MSG`, `PRIV`, `QUIT`) gets an `OK`, always before the `CHAT`; `LIST` gets its `USERS`.
@@ -201,6 +250,7 @@ Still to ask group 1: **A7** (`"`/`\` in nicks), **B2** (`QUIT` before `NICK`),
 > 5. Receivers ignore unknown fields?
 > 6. After the `OK` to `NICK` our server sends a welcome `EVENT` with the commands, only to that client. Does your client just display it?
 > 7. Idle: after 300 s without a message our server sends `ERROR 408 "idle timeout"` and closes (like group 1). Our client sends a `LIST` every 120 s when the user is only reading. On Ctrl+C the server sends `EVENT "server shutting down"` before closing.
+> 8. Discovery (M5): our client broadcasts `{"type":"DISCOVER"}` (no `\n`) to UDP port **5001**; our server answers only to the sender with `{"type":"SERVER","tcp_port":5000,"name":"...","users":N}\n` and ignores anything else. The client connects to the **source IP** of the answer (we send no IP). Do you use the same port and the same request? Does your client read `tcp_port` or `port`? Does it take the IP from the packet or from a field? Broadcast or multicast?
 >
 > Our server accepts IPv4 and IPv6 on port 5000. We also have plain-text test
 > scenarios that run against any server (`python3 scripts/interop.py <ip>
