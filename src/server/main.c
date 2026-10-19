@@ -95,10 +95,30 @@
  *   - Logging (log.h): hora, nível, uma linha por evento, e a CAUSA de cada
  *     saída ("QUIT", "FIN", "RST", "inativo ha 300 s (408)", ...).
  *
- * Uso: ./bin/server [-v | -q] [-i segundos] [-n segundos] [porta]
+ *
+ * O QUE MUDOU DO M4 PARA O M5 (slide 123: "The server answers a UDP broadcast
+ * (DISCOVER) with its TCP port")
+ * -------------------------------------------------------------------------
+ *   - Um socket UDP em 0.0.0.0:5001 (-u; D28). A quem mandar um DISCOVER
+ *     responde-se SÓ a ele, para o IP e a porta de origem, com
+ *     {"type":"SERVER","tcp_port":...,"name":...,"users":...} (disco.h, D29).
+ *     A tcp_port é a da porta em que o listener está REALMENTE (sock_port).
+ *   - SEM thread nova: o ciclo do accept() passa a vigiar três fds no mesmo
+ *     poll() — o pipe de paragem, o listener TCP e o socket UDP. Responder é
+ *     ler um datagrama e enviar outro, sem nunca bloquear (MSG_DONTWAIT): não
+ *     atrasa o accept() de ninguém. E o Ctrl+C não precisa de nada novo:
+ *     sai-se do ciclo e fecha-se o UDP com o resto.
+ *   - Tudo o que não for um DISCOVER é ignorado em silêncio (disco.h: sem
+ *     ping-pong entre servidores, sem amplificar tráfego).
+ *   - Se a porta UDP estiver tomada, avisa no log e o chat funciona na mesma
+ *     — só não é encontrado por broadcast (ainda se liga pelo IP).
+ *
+ * Uso: ./bin/server [-v | -q] [-i s] [-n s] [-u porta UDP] [-N nome] [porta]
  *   -v  log com DEBUG (cada mensagem recebida)    -q  só WARN e ERROR
  *   -i  inatividade até ao 408 (por omissão 300)  -n  prazo para o NICK (30)
+ *   -u  porta UDP da descoberta (5001; 0 desliga) -N  nome anunciado (hostname)
  */
+#include "disco.h"
 #include "framing.h"
 #include "log.h"
 #include "net.h"
@@ -145,6 +165,14 @@ static struct roster R;
 
 static long idle_ms      = IDLE_S_DEFAULT * 1000L;
 static long nick_wait_ms = NICK_WAIT_S_DEFAULT * 1000L;
+
+/* M5: o nome que a resposta ao DISCOVER anuncia (-N, ou o hostname). */
+static char server_name[DISCO_NAME_MAX + 1];
+
+/* M5: quantos datagramas se tratam de cada vez que o poll() acorda, no
+ * máximo. Uma rajada (alguém a mandar DISCOVER sem parar) não pode prender
+ * o ciclo do accept(): o que sobrar fica para a volta seguinte. */
+#define DISCO_BURST 16
 
 /* M4: o encerramento. O handler só pode mexer em variáveis destas (e num
  * _Atomic sem lock, e no write() do pipe, que é async-signal-safe). */
@@ -541,11 +569,73 @@ static const char *signame(int sig)
 
 static void usage(const char *prog)
 {
-    fprintf(stderr, "uso: %s [-v | -q] [-i segundos] [-n segundos] [porta]\n"
+    fprintf(stderr, "uso: %s [-v | -q] [-i segundos] [-n segundos] [-u porta] [-N nome] [porta]\n"
                     "  -v  log com DEBUG       -q  so WARN e ERROR\n"
                     "  -i  inatividade ate ao ERROR 408 (por omissao %d)\n"
-                    "  -n  prazo para o NICK (por omissao %d)\n",
-            prog, IDLE_S_DEFAULT, NICK_WAIT_S_DEFAULT);
+                    "  -n  prazo para o NICK (por omissao %d)\n"
+                    "  -u  porta UDP da descoberta (por omissao %s; 0 desliga)\n"
+                    "  -N  nome anunciado na descoberta (por omissao o hostname; ate %d bytes)\n",
+            prog, IDLE_S_DEFAULT, NICK_WAIT_S_DEFAULT, DISCO_PORT_DEFAULT, DISCO_NAME_MAX);
+}
+
+/* "-u 5001": 0..65535 (0 = sem descoberta), ou -1. */
+static long parse_port(const char *s)
+{
+    char *end;
+    long  v = strtol(s, &end, 10);
+    return (*s != '\0' && *end == '\0' && v >= 0 && v <= 65535) ? v : -1;
+}
+
+/* O nome por omissão: o hostname. O gethostname() pode não terminar a string
+ * se o nome não couber, daí o '\0' à mão; e um hostname que não sirva (não
+ * devia acontecer) dá lugar a um nome fixo. */
+static void default_name(char out[DISCO_NAME_MAX + 1])
+{
+    char host[DISCO_NAME_MAX + 1] = "";
+    if (gethostname(host, sizeof host) == 0)
+        host[DISCO_NAME_MAX] = '\0';
+    snprintf(out, DISCO_NAME_MAX + 1, "%s", disco_valid_name(host) ? host : "chat");
+}
+
+/* ---- Descoberta (M5) ---------------------------------------------------- */
+
+/* O socket UDP tem datagramas: responder a cada DISCOVER (no máximo
+ * DISCO_BURST de cada vez). Nunca bloqueia: tanto o udp_recv() como o
+ * udp_send() são MSG_DONTWAIT. Uma resposta que não saia (buffer cheio)
+ * perde-se, como se perderia na rede: o cliente repete o pedido. */
+static void answer_discovery(int udp, int tcp_port)
+{
+    for (int i = 0; i < DISCO_BURST; i++) {
+        char                    buf[DISCO_DGRAM_MAX];
+        struct sockaddr_storage from;
+        ssize_t n = udp_recv(udp, buf, sizeof buf, &from);
+        if (n == -1) {
+            if (errno != EAGAIN && errno != EWOULDBLOCK)
+                log_warn("descoberta: recv: %s", strerror(errno));
+            return;                             /* acabaram-se */
+        }
+
+        char who[64];
+        addr_to_str((struct sockaddr *)&from, who, sizeof who);
+        if (n == NET_TRUNCATED || !disco_is_request(buf, (size_t)n)) {
+            log_debug("descoberta: %s mandou um datagrama que nao e DISCOVER: ignorado", who);
+            continue;
+        }
+
+        int    users = (int)roster_users(&R);
+        char   reply[DISCO_REPLY_BUF];
+        size_t len;
+        if (disco_build_reply(tcp_port, server_name, users, reply, sizeof reply, &len) != 0) {
+            log_error("descoberta: nao consegui montar a resposta");   /* bug nosso */
+            return;
+        }
+        socklen_t fromlen = from.ss_family == AF_INET6 ? sizeof(struct sockaddr_in6)
+                                                       : sizeof(struct sockaddr_in);
+        if (udp_send(udp, reply, len, (struct sockaddr *)&from, fromlen) != 0)
+            log_debug("descoberta: a resposta a %s nao saiu: %s", who, strerror(errno));
+        else
+            log_debug("descoberta: DISCOVER de %s -> porta %d, %d no chat", who, tcp_port, users);
+    }
 }
 
 /* "-i 2": um inteiro positivo de segundos, ou -1. */
@@ -558,9 +648,11 @@ static long parse_secs(const char *s)
 
 /* Encerramento (D24): parar de aceitar, acordar todas as threads (cada uma
  * avisa o seu cliente e fecha), esperar por elas e libertar tudo. */
-static void shutdown_server(int listener)
+static void shutdown_server(int listener, int udp)
 {
     close(listener);                        /* ninguém novo entra */
+    if (udp >= 0)
+        close(udp);                         /* nem é encontrado (M5) */
     log_info("%s: a encerrar (%zu ligacao(oes) abertas)", signame((int)got_signal),
              roster_count(&R));
 
@@ -592,11 +684,29 @@ static void shutdown_server(int listener)
 
 int main(int argc, char *argv[])
 {
+    const char *udp_port = DISCO_PORT_DEFAULT;
+    default_name(server_name);
+
     int opt;
-    while ((opt = getopt(argc, argv, "vqi:n:h")) != -1) {
+    while ((opt = getopt(argc, argv, "vqi:n:u:N:h")) != -1) {
         switch (opt) {
         case 'v': log_set_level(LV_DEBUG); break;
         case 'q': log_set_level(LV_WARN);  break;
+        case 'u':
+            if (parse_port(optarg) < 0) {
+                usage(argv[0]);
+                return EXIT_FAILURE;
+            }
+            udp_port = optarg;
+            break;
+        case 'N':
+            if (!disco_valid_name(optarg)) {
+                fprintf(stderr, "-N: o nome tem de ter 1 a %d bytes, sem caracteres "
+                                "de controlo\n", DISCO_NAME_MAX);
+                return EXIT_FAILURE;
+            }
+            snprintf(server_name, sizeof server_name, "%s", optarg);
+            break;
         case 'i':
         case 'n': {
             long v = parse_secs(optarg);
@@ -663,15 +773,42 @@ int main(int argc, char *argv[])
     log_info("a escuta na porta %s (max %d clientes; inatividade %ld s, NICK em %ld s)",
              port, ROSTER_MAX, idle_ms / 1000, nick_wait_ms / 1000);
 
+    /* M5: a descoberta. A porta anunciada é a do listener tal como ficou
+     * (o argumento pode ser um nome de serviço). Sem UDP o chat funciona na
+     * mesma: só não é encontrado por broadcast. */
+    int tcp_port = sock_port(listener);
+    int udp      = -1;
+    if (parse_port(udp_port) == 0) {
+        log_info("descoberta UDP desligada (-u 0)");
+    } else {
+        const char *why = "?";
+        udp = udp_bind(udp_port, &why);
+        if (udp < 0)
+            log_warn("descoberta UDP desligada: porta %s: %s", udp_port, why);
+        else
+            log_info("descoberta UDP na porta %s (nome \"%s\")", udp_port, server_name);
+    }
+
     for (;;) {
-        /* Esperar por uma ligação OU pelo pipe de paragem (Ctrl+C). */
-        int w = wait_readable(listener, stop_pipe[0], -1);
-        if (w == NET_STOP)
-            break;
-        if (w < 0) {
+        /* Esperar por uma ligação, por um DISCOVER ou pelo pipe de paragem
+         * (Ctrl+C). Um fd -1 (sem UDP) é ignorado pelo poll(). */
+        struct pollfd pf[3] = {
+            { .fd = stop_pipe[0], .events = POLLIN },
+            { .fd = listener,     .events = POLLIN },
+            { .fd = udp,          .events = POLLIN },
+        };
+        if (poll(pf, 3, -1) < 0) {
+            if (errno == EINTR)
+                continue;
             log_error("poll: %s", strerror(errno));
             break;
         }
+        if (pf[0].revents != 0)                 /* o pipe tem prioridade */
+            break;
+        if (pf[2].revents != 0)
+            answer_discovery(udp, tcp_port);
+        if (pf[1].revents == 0)
+            continue;                           /* só havia UDP */
 
         struct sockaddr_storage peer;          /* cabe IPv4 ou IPv6 */
         socklen_t peer_len = sizeof peer;
@@ -754,6 +891,6 @@ int main(int argc, char *argv[])
         log_error("o ciclo do accept() parou sem sinal: a encerrar");
         on_stop(SIGTERM);
     }
-    shutdown_server(listener);
+    shutdown_server(listener, udp);
     return EXIT_SUCCESS;
 }

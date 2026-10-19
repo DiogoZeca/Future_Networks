@@ -178,6 +178,18 @@ size_t roster_count(struct roster *r)
     return n;
 }
 
+size_t roster_users(struct roster *r)
+{
+    size_t n = 0;
+
+    pthread_mutex_lock(&r->lock);
+    for (size_t i = 0; i < r->n; i++)
+        if (r->v[i]->joined)
+            n++;
+    pthread_mutex_unlock(&r->lock);
+    return n;
+}
+
 /* ---- Nicks (M3) --------------------------------------------------------- */
 
 /* Quem na lista (que não `self`) tem este nick? Chamar com r->lock. Percorre

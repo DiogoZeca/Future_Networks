@@ -14,6 +14,7 @@
  *          bug que o scripts/probe_m2.py apanhou, não de uma ideia à partida.
  *   15-18  Nicks (M3): reserva única, procura por nick, lista de nicks, e a
  *          corrida de dois NICK iguais ao mesmo tempo (18, com threads).
+ *   19     Quantos estão no chat (M5: o "users" da resposta ao DISCOVER).
  *
  * Os clientes de teste usam fd = -1 (o contrato permite), exceto o caso 9 que
  * precisa de um fd real para verificar que o close() acontece.
@@ -562,6 +563,36 @@ static void caso_18_claim_em_paralelo(void)
     CHECK_INT(rondas_mas, 0);
 }
 
+/* 19. roster_users() (M5): so quem esta NO CHAT. Quem ligou e ainda nao fez
+ *     NICK, ou reservou e ainda nao entrou, nao conta. */
+static void caso_19_users(void)
+{
+    roster_init(&R);
+    CASE(19, "vazio");
+    CHECK_INT(roster_users(&R), 0);
+
+    struct client *a = add_joined("a", "ana");
+    struct client *m = roster_add(&R, -1, "mudo");      /* ligou, sem NICK */
+    struct client *z = roster_add(&R, -1, "zed");
+    NEED(a); NEED(m); NEED(z);
+    roster_claim(&R, z, "zed");                         /* reservou, nao entrou */
+
+    CASE(19, "so os que estao no chat (roster_count conta todos)");
+    CHECK_INT(roster_users(&R), 1);
+    CHECK_INT(roster_count(&R), 3);
+
+    CASE(19, "entra mais um, sai o primeiro");
+    roster_join(&R, z, "zed");
+    CHECK_INT(roster_users(&R), 2);
+    roster_remove(&R, a); client_release(&R, a);
+    CHECK_INT(roster_users(&R), 1);
+
+    roster_remove(&R, m); client_release(&R, m);
+    roster_remove(&R, z); client_release(&R, z);
+    CHECK_INT(roster_users(&R), 0);
+    roster_destroy(&R);
+}
+
 /* ------------------------------------------------------------------------ */
 
 int main(void)
@@ -584,5 +615,6 @@ int main(void)
     caso_16_find();
     caso_17_nicks();
     caso_18_claim_em_paralelo();
+    caso_19_users();
     return t_report("roster");
 }

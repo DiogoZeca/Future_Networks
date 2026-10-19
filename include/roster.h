@@ -218,4 +218,10 @@ size_t roster_snapshot(struct roster *r, struct client **out, size_t cap,
  * nunca decidir nada com base nisto. */
 size_t roster_count(struct roster *r);
 
+/* M5: quantos estão NO CHAT (joined) — o "users" da resposta ao DISCOVER
+ * (disco.h, D29). Não conta quem ainda não fez NICK: esses ainda não são
+ * utilizadores, e um port scan ou um `nc` calado não deve aparecer como
+ * gente na sala. O mesmo aviso do roster_count(): é um retrato. */
+size_t roster_users(struct roster *r);
+
 #endif /* ROSTER_H */
