@@ -12,7 +12,7 @@ Cada suite é um binário; o `Makefile` apanha sozinho cada `test_*.c` novo.
 | `test_ui.c` | texto do teclado -> mensagem, mensagem -> ecrã; comandos `/list`, `/msg`, `/quit`; o editor de linha | M1, M2, M3 |
 | `test_roster.c` | lista de clientes partilhada, refcount, com threads; nicks únicos (corrida com 16 threads) | M2, M3 |
 | `test_disco.c` | a descoberta UDP: o que é um pedido (e o que não é), a resposta byte a byte, respostas de outros grupos (`port`), nomes, a lista sem repetidos, a linha mostrada | M5 |
-| `test_net.c` | `send_all_timeout()` com `socketpair()`: prazo total, meia mensagem; IPv4 + IPv6 no mesmo socket (numa máquina sem IPv6 diz que saltou essa parte); `wait_readable()` e `linger_drain()` | M2, M3, M4 |
+| `test_net.c` | `send_all_timeout()` com `socketpair()`: prazo total, meia mensagem; IPv4 + IPv6 no mesmo socket (numa máquina sem IPv6 diz que saltou essa parte); `wait_readable()` e `linger_drain()`; UDP na loopback (`127.255.255.255` é um broadcast a sério): `udp_bind()`, envio/receção, datagrama grande de mais, `SO_BROADCAST`, dois servidores na mesma porta, `broadcast_targets()` | M2, M3, M4, M5 |
 
 Os números dos casos (`#n`) remetem para as tabelas de testes em
 `docs/milestones/M1.md`, `M2.md`, `M3.md`, `M4.md` e `M5.md` (o `test_roster.c` tem numeração

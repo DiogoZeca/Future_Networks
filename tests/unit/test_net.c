@@ -23,7 +23,23 @@
  *   90  wait_readable(): prazo, bytes, FIN e o pipe de paragem (Ctrl+C)
  *   91  linger_drain(): o FIN sai depois do que já foi enviado, o que o peer
  *       ainda manda é lido e deitado fora, e há um prazo
+ *
+ * M5 (UDP, para a descoberta — disco.h). Com sockets UDP reais, mas só na
+ * loopback: 127.0.0.1 e o broadcast da loopback, 127.255.255.255, que é um
+ * broadcast a sério (só entre os programas desta máquina) e funciona mesmo
+ * numa máquina sem rede nenhuma:
+ *  100  addr_ip(): só o IP, sem porta nem parênteses
+ *  101  udp_bind(): porta escolhida pelo kernel, sock_port(), dois servidores
+ *       na mesma porta (SO_REUSEADDR), porta tomada por outro programa
+ *  102  udp_send()/udp_recv(): o IP de origem, responder-lhe, nunca
+ *       bloquear, e um datagrama grande de mais deitado fora INTEIRO
+ *  103  broadcast: sem SO_BROADCAST o kernel recusa (EACCES); com ele, o
+ *       datagrama chega aos DOIS servidores da mesma porta — um unicast só
+ *       a um
+ *  104  broadcast_targets(): 255.255.255.255 primeiro, sem repetidos, sem a
+ *       loopback, e os limites
  */
+#include "disco.h"
 #include "net.h"
 #include "test_util.h"
 
@@ -340,6 +356,217 @@ static void caso_91_linger_drain(void)
     close(sv[0]); close(sv[1]);
 }
 
+/* ===== M5 — UDP ========================================================= */
+
+/* Um sockaddr_in para ip:port (ip em texto). */
+static struct sockaddr_in v4(const char *ip, int port)
+{
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof a);
+    a.sin_family = AF_INET;
+    a.sin_port   = htons((uint16_t)port);
+    inet_pton(AF_INET, ip, &a.sin_addr);
+    return a;
+}
+
+/* Espera até 500 ms por um datagrama em fd. Devolve o que o udp_recv() deu
+ * (ou -1 se nada chegou). */
+static ssize_t recv_wait(int fd, char *buf, size_t cap, struct sockaddr_storage *from)
+{
+    if (wait_readable(fd, -1, 500) != NET_READY)
+        return -1;
+    return udp_recv(fd, buf, cap, from);
+}
+
+static void caso_100_addr_ip(void)
+{
+    char ip[64];
+
+    CASE(100, "IPv4: so o IP");
+    struct sockaddr_in a = v4("192.168.1.10", 5000);
+    addr_ip((struct sockaddr *)&a, ip, sizeof ip);
+    CHECK_STR(ip, "192.168.1.10");
+
+    CASE(100, "IPv6 sem parenteses; ::ffff:a.b.c.d como IPv4");
+    struct sockaddr_in6 b;
+    memset(&b, 0, sizeof b);
+    b.sin6_family = AF_INET6;
+    b.sin6_port   = htons(5000);
+    inet_pton(AF_INET6, "fe80::1", &b.sin6_addr);
+    addr_ip((struct sockaddr *)&b, ip, sizeof ip);
+    CHECK_STR(ip, "fe80::1");
+    inet_pton(AF_INET6, "::ffff:10.0.0.7", &b.sin6_addr);
+    addr_ip((struct sockaddr *)&b, ip, sizeof ip);
+    CHECK_STR(ip, "10.0.0.7");
+
+    CASE(100, "familia que nao e IP: \"?\"; e o addr_to_str continua igual");
+    struct sockaddr u;
+    memset(&u, 0, sizeof u);
+    u.sa_family = AF_UNIX;
+    addr_ip(&u, ip, sizeof ip);
+    CHECK_STR(ip, "?");
+    addr_to_str((struct sockaddr *)&a, ip, sizeof ip);
+    CHECK_STR(ip, "192.168.1.10:5000");
+}
+
+static void caso_101_udp_bind(void)
+{
+    const char *why = NULL;
+
+    CASE(101, "porta \"0\": o kernel escolhe, e o sock_port() diz qual");
+    int a = udp_bind("0", &why);
+    CHECK(a >= 0);
+    int port = sock_port(a);
+    CHECK(port > 0 && port <= 65535);
+
+    CASE(101, "um 2.o servidor na MESMA porta (SO_REUSEADDR)");
+    char ps[16];
+    snprintf(ps, sizeof ps, "%d", port);
+    int b = udp_bind(ps, &why);
+    CHECK(b >= 0);
+    CHECK_INT(sock_port(b), port);
+
+    CASE(101, "porta tomada por um programa SEM SO_REUSEADDR: -1 e o motivo");
+    int other = socket(AF_INET, SOCK_DGRAM, 0);
+    struct sockaddr_in any = v4("0.0.0.0", 0);
+    CHECK_INT(bind(other, (struct sockaddr *)&any, sizeof any), 0);
+    snprintf(ps, sizeof ps, "%d", sock_port(other));
+    why = NULL;
+    CHECK_INT(udp_bind(ps, &why), -1);
+    CHECK(why != NULL && strstr(why, "in use") != NULL);
+
+    CASE(101, "porta invalida: -1 e o motivo; why pode ser NULL");
+    why = NULL;
+    CHECK_INT(udp_bind("nao-e-porta", &why), -1);
+    CHECK(why != NULL);
+    CHECK_INT(udp_bind("nao-e-porta", NULL), -1);
+
+    CASE(101, "sock_port() de um fd que nao e socket: -1");
+    CHECK_INT(sock_port(-1), -1);
+
+    close(a); close(b); close(other);
+}
+
+static void caso_102_send_recv(void)
+{
+    char                    buf[DISCO_DGRAM_MAX];
+    struct sockaddr_storage from;
+    char                    ip[64];
+
+    int srv = udp_bind("0", NULL);
+    int cli = udp_broadcast_socket();
+    CHECK(srv >= 0 && cli >= 0);
+    struct sockaddr_in to = v4("127.0.0.1", sock_port(srv));
+
+    CASE(102, "nada para ler: -1/EAGAIN logo, sem bloquear");
+    long t0 = now_ms();
+    errno = 0;
+    CHECK_INT(udp_recv(srv, buf, sizeof buf, &from), -1);
+    CHECK(errno == EAGAIN || errno == EWOULDBLOCK);
+    CHECK(now_ms() - t0 < 100);
+
+    CASE(102, "um pedido chega inteiro, com o IP e a porta de quem o mandou");
+    CHECK_INT(udp_send(cli, DISCO_REQUEST, strlen(DISCO_REQUEST),
+                       (struct sockaddr *)&to, sizeof to), 0);
+    ssize_t n = recv_wait(srv, buf, sizeof buf, &from);
+    CHECK_INT(n, strlen(DISCO_REQUEST));
+    CHECK(n > 0 && memcmp(buf, DISCO_REQUEST, (size_t)n) == 0);
+    addr_ip((struct sockaddr *)&from, ip, sizeof ip);
+    CHECK_STR(ip, "127.0.0.1");
+    CHECK_INT(ntohs(((struct sockaddr_in *)&from)->sin_port), sock_port(cli));
+
+    CASE(102, "a resposta para esse endereco chega ao cliente, vinda do servidor");
+    CHECK_INT(udp_send(srv, "{\"port\":5000}", 13, (struct sockaddr *)&from, sizeof(struct sockaddr_in)), 0);
+    n = recv_wait(cli, buf, sizeof buf, &from);
+    CHECK_INT(n, 13);
+    CHECK_INT(ntohs(((struct sockaddr_in *)&from)->sin_port), sock_port(srv));
+
+    CASE(102, "datagrama vazio: 0 bytes (um datagrama, nao um fecho)");
+    CHECK_INT(udp_send(cli, "", 0, (struct sockaddr *)&to, sizeof to), 0);
+    CHECK_INT(recv_wait(srv, buf, sizeof buf, NULL), 0);
+
+    CASE(102, "maior do que o buffer: NET_TRUNCATED, e deitado fora INTEIRO");
+    char big[DISCO_DGRAM_MAX + 100];
+    memset(big, 'x', sizeof big);
+    CHECK_INT(udp_send(cli, big, sizeof big, (struct sockaddr *)&to, sizeof to), 0);
+    CHECK_INT(udp_send(cli, "seguinte", 8, (struct sockaddr *)&to, sizeof to), 0);
+    CHECK_INT(recv_wait(srv, buf, sizeof buf, &from), NET_TRUNCATED);
+    n = recv_wait(srv, buf, sizeof buf, &from);   /* o resto NAO aparece aqui */
+    CHECK_INT(n, 8);
+    CHECK(n == 8 && memcmp(buf, "seguinte", 8) == 0);
+
+    close(srv); close(cli);
+}
+
+static void caso_103_broadcast(void)
+{
+    char buf[64];
+
+    int a = udp_bind("0", NULL);
+    char ps[16];
+    snprintf(ps, sizeof ps, "%d", sock_port(a));
+    int b = udp_bind(ps, NULL);                    /* 2 servidores, mesma porta */
+    struct sockaddr_in bc = v4("127.255.255.255", sock_port(a));
+    struct sockaddr_in uc = v4("127.0.0.1", sock_port(a));
+
+    CASE(103, "sem SO_BROADCAST o kernel recusa enviar para um broadcast (EACCES)");
+    int plain = socket(AF_INET, SOCK_DGRAM, 0);
+    errno = 0;
+    CHECK_INT(udp_send(plain, "x", 1, (struct sockaddr *)&bc, sizeof bc), -1);
+    CHECK_INT(errno, EACCES);
+
+    CASE(103, "udp_broadcast_socket() liga o SO_BROADCAST");
+    int cli = udp_broadcast_socket();
+    int on = 0;
+    socklen_t len = sizeof on;
+    CHECK_INT(getsockopt(cli, SOL_SOCKET, SO_BROADCAST, &on, &len), 0);
+    CHECK(on != 0);
+
+    CASE(103, "um broadcast chega aos DOIS servidores da mesma porta");
+    CHECK_INT(udp_send(cli, "bc", 2, (struct sockaddr *)&bc, sizeof bc), 0);
+    CHECK_INT(recv_wait(a, buf, sizeof buf, NULL), 2);
+    CHECK_INT(recv_wait(b, buf, sizeof buf, NULL), 2);
+
+    CASE(103, "um unicast para o mesmo IP e porta chega so a UM deles");
+    CHECK_INT(udp_send(cli, "uc", 2, (struct sockaddr *)&uc, sizeof uc), 0);
+    int got = (recv_wait(a, buf, sizeof buf, NULL) == 2) + (recv_wait(b, buf, sizeof buf, NULL) == 2);
+    CHECK_INT(got, 1);
+
+    close(a); close(b); close(plain); close(cli);
+}
+
+static void caso_104_targets(void)
+{
+    struct sockaddr_in t[16];
+    char               ip[64];
+
+    CASE(104, "o 1.o e sempre 255.255.255.255, com a porta");
+    size_t n = broadcast_targets(5001, t, 16);
+    CHECK(n >= 1);
+    addr_ip((struct sockaddr *)&t[0], ip, sizeof ip);
+    CHECK_STR(ip, "255.255.255.255");
+
+    CASE(104, "todos IPv4, com a porta, sem repetidos e sem a loopback");
+    printf("  (destinos nesta maquina:");
+    for (size_t i = 0; i < n; i++) {
+        addr_ip((struct sockaddr *)&t[i], ip, sizeof ip);
+        printf(" %s", ip);
+        CHECK_INT(t[i].sin_family, AF_INET);
+        CHECK_INT(ntohs(t[i].sin_port), 5001);
+        CHECK((ntohl(t[i].sin_addr.s_addr) >> 24) != 127);
+        for (size_t j = 0; j < i; j++)
+            CHECK(t[j].sin_addr.s_addr != t[i].sin_addr.s_addr);
+    }
+    printf(")\n");
+
+    CASE(104, "limites: max 1 so o limitado; max 0, porta 0 ou 70000: nada");
+    CHECK_INT(broadcast_targets(5001, t, 1), 1);
+    CHECK_INT(broadcast_targets(5001, t, 0), 0);
+    CHECK_INT(broadcast_targets(0, t, 16), 0);
+    CHECK_INT(broadcast_targets(70000, t, 16), 0);
+    CHECK_INT(broadcast_targets(5001, NULL, 16), 0);
+}
+
 int main(void)
 {
     caso_53_normal();
@@ -351,5 +578,10 @@ int main(void)
     caso_77_dual_stack();
     caso_90_wait_readable();
     caso_91_linger_drain();
+    caso_100_addr_ip();
+    caso_101_udp_bind();
+    caso_102_send_recv();
+    caso_103_broadcast();
+    caso_104_targets();
     return t_report("net");
 }

@@ -1,8 +1,16 @@
+/* M5: as flags das interfaces (IFF_UP, IFF_BROADCAST... em <net/if.h>) e o
+ * getifaddrs() não são POSIX: a glibc só as mostra com _DEFAULT_SOURCE. Tem
+ * de vir ANTES de qualquer #include, e fica só neste ficheiro (o resto do
+ * projeto continua em POSIX estrito, -D_POSIX_C_SOURCE=200809L). */
+#define _DEFAULT_SOURCE
+
 #include "net.h"
 #include "log.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <ifaddrs.h>
+#include <net/if.h>
 #include <netdb.h>
 #include <poll.h>
 #include <stdio.h>
@@ -256,29 +264,184 @@ ssize_t recv_retry(int fd, void *buf, size_t len)
     }
 }
 
-void addr_to_str(const struct sockaddr *sa, char *out, size_t outlen)
+void addr_ip(const struct sockaddr *sa, char *out, size_t outlen)
 {
-    char ip[INET6_ADDRSTRLEN] = "?";
-    unsigned port = 0;
-    int v6 = 0;
-
+    if (out == NULL || outlen == 0)
+        return;
+    const char *r = NULL;
     if (sa->sa_family == AF_INET) {
         const struct sockaddr_in *a = (const struct sockaddr_in *)sa;
-        inet_ntop(AF_INET, &a->sin_addr, ip, sizeof ip);
-        port = ntohs(a->sin_port);
+        r = inet_ntop(AF_INET, &a->sin_addr, out, (socklen_t)outlen);
+    } else if (sa->sa_family == AF_INET6) {
+        const struct sockaddr_in6 *a = (const struct sockaddr_in6 *)sa;
+        if (IN6_IS_ADDR_V4MAPPED(&a->sin6_addr))
+            /* Um cliente IPv4 num socket dual-stack chega como
+             * ::ffff:a.b.c.d. Mostra-se como o IPv4 que é. */
+            r = inet_ntop(AF_INET, &a->sin6_addr.s6_addr[12], out, (socklen_t)outlen);
+        else
+            r = inet_ntop(AF_INET6, &a->sin6_addr, out, (socklen_t)outlen);
+    }
+    if (r == NULL)
+        snprintf(out, outlen, "?");
+}
+
+void addr_to_str(const struct sockaddr *sa, char *out, size_t outlen)
+{
+    char     ip[INET6_ADDRSTRLEN];
+    unsigned port = 0;
+    int      v6   = 0;
+
+    addr_ip(sa, ip, sizeof ip);
+    if (sa->sa_family == AF_INET) {
+        port = ntohs(((const struct sockaddr_in *)sa)->sin_port);
     } else if (sa->sa_family == AF_INET6) {
         const struct sockaddr_in6 *a = (const struct sockaddr_in6 *)sa;
         port = ntohs(a->sin6_port);
-        if (IN6_IS_ADDR_V4MAPPED(&a->sin6_addr)) {
-            /* Um cliente IPv4 num socket dual-stack chega como
-             * ::ffff:a.b.c.d. Nos logs mostra-se como o IPv4 que é. */
-            inet_ntop(AF_INET, &a->sin6_addr.s6_addr[12], ip, sizeof ip);
-        } else {
-            inet_ntop(AF_INET6, &a->sin6_addr, ip, sizeof ip);
-            v6 = 1;
-        }
+        v6   = !IN6_IS_ADDR_V4MAPPED(&a->sin6_addr);
     }
     /* IPv6 entre parênteses retos ("[::1]:5000"), como num URL: senão os
      * ':' do endereço confundem-se com o da porta. */
     snprintf(out, outlen, v6 ? "[%s]:%u" : "%s:%u", ip, port);
+}
+
+int sock_port(int fd)
+{
+    struct sockaddr_storage ss;
+    socklen_t               len = sizeof ss;
+    if (getsockname(fd, (struct sockaddr *)&ss, &len) != 0)
+        return -1;
+    if (ss.ss_family == AF_INET)
+        return ntohs(((struct sockaddr_in *)&ss)->sin_port);
+    if (ss.ss_family == AF_INET6)
+        return ntohs(((struct sockaddr_in6 *)&ss)->sin6_port);
+    return -1;
+}
+
+/* ===== M5 — UDP ========================================================= */
+
+int udp_bind(const char *port, const char **why)
+{
+    const char *dummy;
+    if (why == NULL)
+        why = &dummy;
+
+    struct addrinfo hints, *res;
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family   = AF_INET;      /* só IPv4: broadcast (D32) */
+    hints.ai_socktype = SOCK_DGRAM;   /* UDP */
+    hints.ai_flags    = AI_PASSIVE;   /* host NULL => 0.0.0.0 */
+
+    int rc = getaddrinfo(NULL, port, &hints, &res);
+    if (rc != 0) {
+        *why = gai_strerror(rc);      /* ex.: porta inválida */
+        return -1;
+    }
+
+    int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+    if (fd < 0) {
+        *why = strerror(errno);
+    } else {
+        int yes = 1;                  /* dois servidores na mesma máquina */
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof yes);
+        if (bind(fd, res->ai_addr, res->ai_addrlen) != 0) {
+            *why = strerror(errno);   /* ex.: EADDRINUSE */
+            close(fd);
+            fd = -1;
+        }
+    }
+    freeaddrinfo(res);
+    return fd;
+}
+
+int udp_broadcast_socket(void)
+{
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0)
+        return -1;
+    int yes = 1;
+    if (setsockopt(fd, SOL_SOCKET, SO_BROADCAST, &yes, sizeof yes) != 0) {
+        int e = errno;
+        close(fd);
+        errno = e;
+        return -1;
+    }
+    return fd;
+}
+
+int udp_send(int fd, const void *buf, size_t len,
+             const struct sockaddr *to, socklen_t tolen)
+{
+    for (;;) {
+        ssize_t n = sendto(fd, buf, len, MSG_DONTWAIT | MSG_NOSIGNAL, to, tolen);
+        if (n >= 0)
+            return (size_t)n == len ? 0 : -1; /* um datagrama é tudo ou nada */
+        if (errno != EINTR)
+            return -1;
+    }
+}
+
+ssize_t udp_recv(int fd, void *buf, size_t cap, struct sockaddr_storage *from)
+{
+    for (;;) {
+        /* recvmsg e não recvfrom: é o msg_flags que diz, de forma portável,
+         * se o datagrama não cabia (MSG_TRUNC). O recvfrom devolvia só os
+         * cap primeiros bytes como se fosse o datagrama todo. */
+        struct iovec  iov = { .iov_base = buf, .iov_len = cap };
+        struct msghdr mh;
+        memset(&mh, 0, sizeof mh);
+        mh.msg_name    = from;
+        mh.msg_namelen = from != NULL ? sizeof *from : 0;
+        mh.msg_iov     = &iov;
+        mh.msg_iovlen  = 1;
+
+        ssize_t n = recvmsg(fd, &mh, MSG_DONTWAIT);
+        if (n < 0 && errno == EINTR)
+            continue;
+        if (n < 0)
+            return -1;
+        if (mh.msg_flags & MSG_TRUNC)
+            return NET_TRUNCATED;
+        return n;
+    }
+}
+
+/* Acrescenta o endereço `a` (com a porta) a out[], se ainda lá não estiver e
+ * houver lugar. Devolve o novo n. */
+static size_t add_target(struct sockaddr_in *out, size_t n, size_t max,
+                         struct in_addr a, int port)
+{
+    for (size_t i = 0; i < n; i++)
+        if (out[i].sin_addr.s_addr == a.s_addr)
+            return n;
+    if (n >= max)
+        return n;
+    memset(&out[n], 0, sizeof out[n]);
+    out[n].sin_family = AF_INET;
+    out[n].sin_port   = htons((uint16_t)port);
+    out[n].sin_addr   = a;
+    return n + 1;
+}
+
+size_t broadcast_targets(int port, struct sockaddr_in *out, size_t max)
+{
+    if (port < 1 || port > 65535 || out == NULL || max == 0)
+        return 0;
+
+    struct in_addr limited = { .s_addr = htonl(INADDR_BROADCAST) };
+    size_t         n       = add_target(out, 0, max, limited, port);
+
+    struct ifaddrs *ifs;
+    if (getifaddrs(&ifs) != 0)
+        return n;                     /* fica o limitado, que é melhor do que nada */
+    for (struct ifaddrs *i = ifs; i != NULL; i = i->ifa_next) {
+        unsigned f = i->ifa_flags;
+        if (i->ifa_addr == NULL || i->ifa_addr->sa_family != AF_INET ||
+            !(f & IFF_UP) || !(f & IFF_BROADCAST) || (f & IFF_LOOPBACK) ||
+            i->ifa_broadaddr == NULL)
+            continue;
+        const struct sockaddr_in *b = (const struct sockaddr_in *)i->ifa_broadaddr;
+        n = add_target(out, n, max, b->sin_addr, port);
+    }
+    freeifaddrs(ifs);
+    return n;
 }
