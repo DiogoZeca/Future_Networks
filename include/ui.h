@@ -141,4 +141,11 @@ size_t ui_line_tail(const struct ui_line *l, size_t cols);
  * buf[ui_line_tail(l, cols) .. ui_line_shown(l)). */
 size_t ui_line_shown(const struct ui_line *l);
 
+/* ---- M5: escolher um servidor da descoberta ---------------------------- */
+
+/* O que o utilizador escreveu quando a descoberta encontrou `n` servidores e
+ * se lhe pediu um número: "2", " 2 ", "2\n" -> 2. Devolve 1..n, ou 0 se não
+ * for um número nesse intervalo ("", "0", "x", "2x", "-1", n+1...). */
+int ui_parse_choice(const char *typed, size_t n);
+
 #endif /* UI_H */

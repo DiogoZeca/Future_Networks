@@ -5,7 +5,8 @@
  * e o USERS (M3); 84 da revisão do M3 (mostrar várias linhas sem deixar um
  * '\033' mexer no terminal, e o que o protocolo cortou). O 43 mudou: o tab
  * passou a ser texto válido. 85-87 da correção do M3: o editor de linha
- * (ui_line_*), tecla a tecla, sem terminal.
+ * (ui_line_*), tecla a tecla, sem terminal. 105 do M5: o número que se
+ * escreve para escolher um dos servidores encontrados pela descoberta.
  */
 #include "ui.h"
 #include "test_util.h"
@@ -507,6 +508,29 @@ static void caso_87_editor_limites(void)
     CHECK_INT(ui_line_tail(&ln, 1), 3);         /* "é" */
 }
 
+/* 105. M5: escolher um dos n servidores encontrados. */
+static void caso_105_escolha(void)
+{
+    CASE(105, "um numero de 1 a n, com espacos e fim de linha");
+    CHECK_INT(ui_parse_choice("1", 3), 1);
+    CHECK_INT(ui_parse_choice("3\n", 3), 3);
+    CHECK_INT(ui_parse_choice("  2 \r\n", 3), 2);
+    CHECK_INT(ui_parse_choice("12", 12), 12);
+
+    CASE(105, "fora do intervalo ou nao e numero: 0");
+    CHECK_INT(ui_parse_choice("0", 3), 0);
+    CHECK_INT(ui_parse_choice("4", 3), 0);
+    CHECK_INT(ui_parse_choice("", 3), 0);
+    CHECK_INT(ui_parse_choice("\n", 3), 0);
+    CHECK_INT(ui_parse_choice("x", 3), 0);
+    CHECK_INT(ui_parse_choice("2x", 3), 0);
+    CHECK_INT(ui_parse_choice("1 2", 3), 0);
+    CHECK_INT(ui_parse_choice("-1", 3), 0);
+    CHECK_INT(ui_parse_choice("+1", 3), 0);
+    CHECK_INT(ui_parse_choice("1", 0), 0);
+    CHECK_INT(ui_parse_choice("99999999999999999999", 3), 0);   /* sem overflow */
+}
+
 int main(void)
 {
     caso_40_linha_normal();
@@ -526,5 +550,6 @@ int main(void)
     caso_85_editor_teclas();
     caso_86_editor_escapes();
     caso_87_editor_limites();
+    caso_105_escolha();
     return t_report("ui");
 }

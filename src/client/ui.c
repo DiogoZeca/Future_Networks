@@ -375,3 +375,24 @@ size_t ui_line_shown(const struct ui_line *l)
 {
     return l->len - (size_t)l->part;
 }
+
+/* ---- M5 ----------------------------------------------------------------- */
+
+int ui_parse_choice(const char *typed, size_t n)
+{
+    const char *p = typed;
+    while (*p == ' ' || *p == '\t')
+        p++;
+    size_t v = 0, digits = 0;
+    while (*p >= '0' && *p <= '9') {
+        v = v * 10 + (size_t)(*p - '0');
+        if (++digits > 6)                   /* ninguém tem 1000000 servidores */
+            return 0;
+        p++;
+    }
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')
+        p++;
+    if (digits == 0 || *p != '\0' || v < 1 || v > n)
+        return 0;
+    return (int)v;
+}

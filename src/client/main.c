@@ -98,15 +98,34 @@
  *   - Ctrl+C (e SIGTERM/SIGHUP): sai como o /quit — manda QUIT e espera o
  *     fecho. Um segundo Ctrl+C termina logo (term.c).
  *
- * Uso: ./bin/client [-k segundos] <host> [porta] [nick]
+ *
+ * O QUE MUDOU NO M5 (slide 123: "the client finds servers on the LAN with no
+ * address typed in")
+ * ---------------------------------------------------------------------------
+ *   - Sem endereço (`./bin/client`), o cliente PROCURA servidores: manda um
+ *     DISCOVER por broadcast UDP (porta 5001), junta as respostas durante
+ *     1,5 s, mostra-as e liga-se ao escolhido (discover.c). Um só → liga-se
+ *     logo. Nenhum → diz porquê pode ter falhado (firewall!) e sai.
+ *   - O IP a que se liga é o de ORIGEM da resposta, nunca um que venha na
+ *     mensagem; a porta é a "tcp_port" (ou "port") da resposta.
+ *   - Depois de escolher, tudo como antes: o nick, o NICK, o chat.
+ *   - Com endereço, nada muda (as opções -u, -w e -b só contam sem ele).
+ *
+ * Uso: ./bin/client [-k s] [-u porta UDP] [-w ms] [-b ip]... [<host> [porta] [nick]]
  *   -k  keepalive (por omissão 120; 0 desliga)   sem nick, é pedido ao arrancar
+ *   sem host, procura servidores na rede:
+ *   -u  porta UDP da descoberta (5001)  -w  espera pelas respostas (1500 ms)
+ *   -b  para onde mandar o DISCOVER em vez do broadcast (repetível; ex.:
+ *       -b 127.255.255.255 só nesta máquina, -b 192.168.1.20 um servidor só)
  */
+#include "discover.h"
 #include "framing.h"
 #include "net.h"
 #include "protocol.h"
 #include "term.h"
 #include "ui.h"
 
+#include <arpa/inet.h>
 #include <errno.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -446,33 +465,130 @@ again:
     }
 }
 
+static void usage(const char *prog)
+{
+    fprintf(stderr, "uso: %s [-k segundos] [<host> [porta] [nick]]\n"
+                    "  -k  keepalive em segundos (por omissao %d; 0 desliga)\n"
+                    "  sem host, procura servidores na rede (UDP):\n"
+                    "  -u  porta UDP da descoberta (por omissao %s)\n"
+                    "  -w  quanto tempo esperar pelas respostas, em ms (por omissao %d)\n"
+                    "  -b  mandar o pedido para este IPv4 em vez do broadcast (repetivel)\n",
+            prog, KEEPALIVE_S, DISCO_PORT_DEFAULT, DISCOVER_WAIT_MS);
+}
+
+/* "-u 5001", "-w 1500": um inteiro em [lo, hi], ou -1. */
+static long parse_num(const char *s, long lo, long hi)
+{
+    char *end;
+    long  v = strtol(s, &end, 10);
+    return (*s != '\0' && *end == '\0' && v >= lo && v <= hi) ? v : -1;
+}
+
+/* M5: sem host, procurar servidores e escolher um. Escreve o IP em ip[] e a
+ * porta TCP em port[]. Devolve 0, ou -1 (já explicado ao utilizador). */
+static int find_server(const struct discover_opts *o, char *ip, size_t ipcap,
+                       char *port, size_t portcap)
+{
+    struct disco_list    found;
+    struct discover_info info;
+
+    printf("[client] a procurar servidores na rede (UDP %d, %ld ms)...\n",
+           o->udp_port, o->wait_ms);
+    if (discover(o, &found, &info) != 0) {
+        fprintf(stderr, "[client] nao consegui procurar: %s\n", strerror(errno));
+        return -1;
+    }
+    if (info.loopback_only)
+        printf("[client] sem rede: so procurei nesta maquina\n");
+    if (info.dropped > 0)
+        printf("[client] mais servidores responderam do que cabem na lista (%d)\n",
+               DISCO_SERVERS_MAX);
+
+    if (found.n == 0) {
+        fprintf(stderr,
+                "[client] nenhum servidor respondeu. Possiveis razoes:\n"
+                "  - nao ha nenhum servidor a correr nesta rede;\n"
+                "  - a firewall do servidor bloqueia a porta UDP %d "
+                "(Ubuntu: sudo ufw allow %d/udp);\n"
+                "  - a rede nao deixa passar broadcasts (Wi-Fi com isolamento de clientes).\n"
+                "  Se souberes o endereco: %s <ip> [porta] [nick]\n",
+                o->udp_port, o->udp_port, "./bin/client");
+        return -1;
+    }
+
+    int k = discover_choose(&found);
+    if (k < 0)
+        return -1;                              /* EOF no teclado */
+    snprintf(ip, ipcap, "%s", found.s[k].ip);
+    snprintf(port, portcap, "%d", found.s[k].tcp_port);
+    return 0;
+}
+
 int main(int argc, char *argv[])
 {
+    struct discover_opts dopt = { .udp_port = 0, .wait_ms = DISCOVER_WAIT_MS };
+    dopt.udp_port = (int)parse_num(DISCO_PORT_DEFAULT, 1, 65535);
+
     int opt;
-    while ((opt = getopt(argc, argv, "k:h")) != -1) {
-        if (opt == 'k') {
-            char *end;
-            long  v = strtol(optarg, &end, 10);
-            if (*optarg == '\0' || *end != '\0' || v < 0 || v > 86400) {
+    while ((opt = getopt(argc, argv, "k:u:w:b:h")) != -1) {
+        long v;
+        struct in_addr a;
+        switch (opt) {
+        case 'k':
+            if ((v = parse_num(optarg, 0, 86400)) < 0) {
                 fprintf(stderr, "-k: segundos entre 0 e 86400\n");
                 return EXIT_FAILURE;
             }
             keepalive_ms = v * 1000;
-        } else {
-            fprintf(stderr, "uso: %s [-k segundos] <host> [porta] [nick]\n", argv[0]);
+            break;
+        case 'u':
+            if ((v = parse_num(optarg, 1, 65535)) < 0) {
+                fprintf(stderr, "-u: porta UDP entre 1 e 65535\n");
+                return EXIT_FAILURE;
+            }
+            dopt.udp_port = (int)v;
+            break;
+        case 'w':
+            if ((v = parse_num(optarg, 1, 60000)) < 0) {
+                fprintf(stderr, "-w: milissegundos entre 1 e 60000\n");
+                return EXIT_FAILURE;
+            }
+            dopt.wait_ms = v;
+            break;
+        case 'b':
+            if (inet_pton(AF_INET, optarg, &a) != 1) {
+                fprintf(stderr, "-b: tem de ser um endereco IPv4 (ex.: 192.168.1.255)\n");
+                return EXIT_FAILURE;
+            }
+            if (dopt.n_targets == DISCOVER_TARGETS_MAX) {
+                fprintf(stderr, "-b: no maximo %d\n", DISCOVER_TARGETS_MAX);
+                return EXIT_FAILURE;
+            }
+            dopt.targets[dopt.n_targets++] = optarg;
+            break;
+        default:
+            usage(argv[0]);
             return opt == 'h' ? EXIT_SUCCESS : EXIT_FAILURE;
         }
     }
     argc -= optind - 1;                     /* argv[1] passa a ser o host */
     argv += optind - 1;
-    if (argc < 2) {
-        fprintf(stderr, "uso: %s [-k segundos] <host> [porta] [nick]\n", argv[0]);
-        return EXIT_FAILURE;
-    }
-    const char *host = argv[1];
-    const char *port = (argc > 2) ? argv[2] : DEFAULT_PORT;
 
     setvbuf(stdout, NULL, _IOLBF, 0);       /* ver cada linha logo, mesmo em pipe */
+
+    /* M5: sem host, procurar. Os buffers são static: host e port apontam
+     * para eles até ao fim. */
+    static char found_ip[DISCO_IP_BUF], found_port[8];
+    const char *host, *port;
+    if (argc < 2) {
+        if (find_server(&dopt, found_ip, sizeof found_ip, found_port, sizeof found_port) != 0)
+            return EXIT_FAILURE;
+        host = found_ip;
+        port = found_port;
+    } else {
+        host = argv[1];
+        port = (argc > 2) ? argv[2] : DEFAULT_PORT;
+    }
 
     /* Validar o nick ANTES de ligar: com as mesmas regras do servidor, um
      * erro aqui poupa uma ida e volta pela rede só para ouvir um 400. */
