@@ -47,3 +47,25 @@ No fim de cada cenário o script fecha com FIN e **espera que o servidor feche**
 do lado dele (no máximo 1 s). Sem isso, como todos os cenários usam o nick
 "ana", o cenário seguinte às vezes pedia "ana" antes de o servidor ter dado
 pela saída do anterior, e levava um `409` falso (M3.md, P33).
+
+---
+
+## `discover.py` (M5)
+
+Quem responde a um `DISCOVER` nesta rede, e **como**: manda o pedido por
+broadcast (`255.255.255.255` e o broadcast de cada interface) e mostra cada
+resposta **em bruto**, com o IP de origem, e o que o nosso cliente faria com
+ela. Para o dia da interoperabilidade: separa "a rede não deixa passar"
+(ninguém responde) de "o formato é outro" (responde, mas o cliente ignora).
+
+```sh
+python3 scripts/discover.py                       # broadcast, porta 5001, 2 s
+python3 scripts/discover.py --plain               # pedido em texto: DISCOVER
+python3 scripts/discover.py --to 192.168.1.20     # um servidor só (unicast)
+```
+
+```
+> {"type":"DISCOVER"} para 255.255.255.255:5001
+< 192.168.1.23:5001  b'{"type":"SERVER","tcp_port":5000,"name":"g1","users":2}\n'
+    ok: porta TCP 5000 via 'tcp_port'
+```

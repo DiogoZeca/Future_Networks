@@ -30,15 +30,35 @@ def free_port():
     return port
 
 
+def free_udp_port():
+    """Uma porta UDP livre agora (M5: a descoberta de cada servidor de teste)."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.bind(("0.0.0.0", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
 class Server:
     """O nosso ./bin/server, num processo a parte, com o log num ficheiro.
 
     O log vai para um ficheiro e NAO para um pipe: um pipe que ninguem le
     enche aos 64 KB, o servidor fica bloqueado a escrever o log e o chat
-    inteiro para (M2.md, nota 6)."""
+    inteiro para (M2.md, nota 6).
+
+    M5: cada servidor tem a SUA porta UDP de descoberta (udp_port), livre,
+    em vez da 5001 de todos: assim os testes nao se ouvem uns aos outros (nem
+    a um servidor a serio que esteja a correr na maquina). Quem passar "-u"
+    escolhe a sua."""
 
     def __init__(self, *args, port=None):
         self.port = port or free_port()
+        if "-u" in args:
+            u = args[args.index("-u") + 1]
+            self.udp_port = int(u) if u.isdigit() else None
+        else:
+            self.udp_port = free_udp_port()
+            args = ("-u", str(self.udp_port), *args)
         self._log = tempfile.TemporaryFile(mode="w+")
         self.proc = subprocess.Popen([SERVER, *args, str(self.port)],
                                      stdout=self._log, stderr=subprocess.STDOUT)

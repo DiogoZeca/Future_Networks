@@ -11,6 +11,7 @@
 #include "disco.h"
 #include "protocol.h"          /* proto_utf8_valid(): a mesma regra das linhas */
 
+#include <arpa/inet.h>       /* inet_pton: ordenar IPs como números */
 #include <cjson/cJSON.h>
 #include <limits.h>
 #include <netinet/in.h>        /* INET6_ADDRSTRLEN */
@@ -253,6 +254,51 @@ void disco_list_init(struct disco_list *l)
     memset(l, 0, sizeof *l);
 }
 
+/* IPv4 comparados como números (10.0.0.9 < 10.0.0.10, ao contrário do
+ * strcmp); o que não for IPv4 compara-se como texto. */
+static int ip_cmp(const char *a, const char *b)
+{
+    struct in_addr x, y;
+    if (inet_pton(AF_INET, a, &x) == 1 && inet_pton(AF_INET, b, &y) == 1) {
+        uint32_t u = ntohl(x.s_addr), v = ntohl(y.s_addr);
+        return (u > v) - (u < v);
+    }
+    return strcmp(a, b);
+}
+
+/* A ordem da lista (disco.h): com name antes de sem name; name sem contar
+ * maiúsculas; IP; porta. */
+static int server_cmp(const struct disco_server *a, const struct disco_server *b)
+{
+    int an = a->name[0] != '\0', bn = b->name[0] != '\0';
+    if (an != bn)
+        return an ? -1 : 1;
+    if (an) {
+        int c = proto_nick_cmp(a->name, b->name);
+        if (c != 0)
+            return c;
+    }
+    int c = ip_cmp(a->ip, b->ip);
+    if (c != 0)
+        return c;
+    return (a->tcp_port > b->tcp_port) - (a->tcp_port < b->tcp_port);
+}
+
+/* Ordenação por inserção: no máximo 32 servidores, e a lista já vem quase
+ * ordenada (só o último mudou). */
+static void sort_list(struct disco_list *l)
+{
+    for (size_t i = 1; i < l->n; i++) {
+        struct disco_server x = l->s[i];
+        size_t j = i;
+        while (j > 0 && server_cmp(&l->s[j - 1], &x) > 0) {
+            l->s[j] = l->s[j - 1];
+            j--;
+        }
+        l->s[j] = x;
+    }
+}
+
 int disco_list_add(struct disco_list *l, const struct disco_server *srv)
 {
     for (size_t i = 0; i < l->n; i++) {
@@ -260,12 +306,14 @@ int disco_list_add(struct disco_list *l, const struct disco_server *srv)
         if (s->tcp_port == srv->tcp_port && strcmp(s->ip, srv->ip) == 0) {
             memcpy(s->name, srv->name, sizeof s->name);
             s->users = srv->users;
+            sort_list(l);                   /* o name pode ter mudado */
             return 0;
         }
     }
     if (l->n >= DISCO_SERVERS_MAX)
         return -1;
     l->s[l->n++] = *srv;
+    sort_list(l);
     return 1;
 }
 

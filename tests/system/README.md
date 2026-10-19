@@ -1,4 +1,4 @@
-# Testes de sistema (M4)
+# Testes de sistema (M4, M5)
 
 O servidor e o cliente **a sério**, com ligações TCP reais, em pytest (slide
 123: *"automated tests with pytest"*). Só usam a biblioteca padrão do Python.
@@ -18,9 +18,14 @@ python3 -m pytest tests/system/test_interop.py --host <ip> --port 5000
 | `test_client.py` | o nosso cliente por um pipe, contra o nosso servidor e contra servidores falsos; keepalive, servidor mudo, Ctrl+C (M3, M4) |
 | `test_terminal.py` | o nosso cliente num pseudo-terminal: a linha de escrita, Ctrl+D, Ctrl+C (correção do M3, M4) |
 | `test_interop.py` | os cenários de `tests/interop/` × 3 modos de envio |
+| `test_discovery.py` | a descoberta UDP: a resposta ao `DISCOVER`, o silêncio a tudo o resto, `users`, `-N`, `-u`, porta ocupada, dois servidores na mesma porta, rajada e fuzz; o cliente sem endereço contra servidores nossos e falsos (outros formatos, lixo, IP falso na mensagem), a lista ordenada e a escolha (M5) |
 | `test_robustness.py` | idle timeout, fecho sem RST, RST/half-close/`kill -9`, fuzz de JSON, Ctrl+C, log (M4) |
 
 O `conftest.py` arranca um servidor novo por teste, numa porta livre, com o log
-num ficheiro (`helpers.py`); no fim de cada teste encerra-o com **Ctrl+C** e
+num ficheiro (`helpers.py`) e, desde o M5, com a sua própria porta UDP de
+descoberta (`-u`, livre) — os testes não se ouvem uns aos outros nem a um
+servidor a sério na 5001. A descoberta é testada na loopback
+(`127.255.255.255`, um broadcast a sério só desta máquina), por isso não
+depende da rede nem da firewall; no fim de cada teste encerra-o com **Ctrl+C** e
 verifica que saiu com 0 e sem relatórios dos sanitizers. Detalhe e resultados
 em [`docs/milestones/M4.md`](../../docs/milestones/M4.md).

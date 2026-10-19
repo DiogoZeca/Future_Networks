@@ -337,11 +337,44 @@ static void caso_98_lista(void)
     CASE(98, "outra porta no mesmo IP, ou outro IP: servidores diferentes");
     struct disco_server b = mk("192.168.1.10", 5002, "", -1);
     struct disco_server c = mk("192.168.1.11", 5000, "", -1);
-    CHECK_INT(disco_list_add(&l, &b), 1);
     CHECK_INT(disco_list_add(&l, &c), 1);
+    CHECK_INT(disco_list_add(&l, &b), 1);
     CHECK_INT(l.n, 3);
-    CHECK_INT(l.s[1].tcp_port, 5002);                /* ordem de chegada */
-    CHECK_STR(l.s[2].ip, "192.168.1.11");
+
+    CASE(98, "ordenada: com name primeiro; depois IP e porta");
+    CHECK_STR(l.s[0].name, "novo");
+    CHECK_INT(l.s[1].tcp_port, 5002);                /* .10 antes de .11, */
+    CHECK_STR(l.s[2].ip, "192.168.1.11");            /* embora tenha chegado depois */
+
+    CASE(98, "name sem contar maiusculas; IP como numero; a ordem de chegada nao conta");
+    disco_list_init(&l);
+    const char *ips[] = { "10.0.0.10", "10.0.0.9", "10.0.0.9" };
+    const int   ports[] = { 5000, 6000, 5000 };
+    struct disco_server z = mk("10.0.0.1", 5000, "zeta", -1);
+    struct disco_server A = mk("10.0.0.2", 5000, "Alfa", -1);
+    struct disco_server m = mk("10.0.0.3", 5000, "meio", -1);
+    CHECK_INT(disco_list_add(&l, &z), 1);
+    for (int i = 0; i < 3; i++) {
+        struct disco_server u = mk(ips[i], ports[i], "", -1);
+        CHECK_INT(disco_list_add(&l, &u), 1);
+    }
+    CHECK_INT(disco_list_add(&l, &m), 1);
+    CHECK_INT(disco_list_add(&l, &A), 1);
+    CHECK_STR(l.s[0].name, "Alfa");
+    CHECK_STR(l.s[1].name, "meio");
+    CHECK_STR(l.s[2].name, "zeta");
+    CHECK_STR(l.s[3].ip, "10.0.0.9");                /* 9 < 10, como numero */
+    CHECK_INT(l.s[3].tcp_port, 5000);
+    CHECK_STR(l.s[4].ip, "10.0.0.9");
+    CHECK_INT(l.s[4].tcp_port, 6000);
+    CHECK_STR(l.s[5].ip, "10.0.0.10");
+
+    CASE(98, "um repetido que muda de name muda de lugar");
+    struct disco_server z2 = mk("10.0.0.1", 5000, "aaa", -1);
+    CHECK_INT(disco_list_add(&l, &z2), 0);
+    CHECK_STR(l.s[0].name, "aaa");
+    CHECK_STR(l.s[1].name, "Alfa");
+    CHECK_INT(l.n, 6);
 
     CASE(98, "cheia: -1 e nao entra; um repetido continua a ser reconhecido");
     disco_list_init(&l);

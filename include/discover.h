@@ -10,8 +10,9 @@
  *      perder pacotes e ninguém avisa (nem quem envia nem quem recebe);
  *   3. junta as respostas durante wait_ms, sem repetidos (disco_list), com o
  *      IP de ORIGEM de cada uma (nunca um IP que venha na mensagem);
- *   4. mostra a lista e o utilizador escolhe (discover_choose): um servidor
- *      só → liga-se logo; nenhum → explica porquê pode ter falhado.
+ *   4. mostra a lista, ORDENADA (disco.h: os mesmos servidores dão sempre os
+ *      mesmos números), e o utilizador escolhe (discover_choose): um
+ *      servidor só → liga-se logo; nenhum → explica porquê pode ter falhado.
  *
  * Os bytes (o que é uma resposta, a lista, a linha mostrada) estão no disco.c
  * e os sockets no net.c, ambos testados à unidade. Aqui fica só a ordem das
@@ -48,7 +49,7 @@ struct discover_info {
     size_t dropped;       /* respostas de servidores que já não couberam       */
 };
 
-/* Procura servidores e deixa-os em *out (pela ordem de chegada). Demora
+/* Procura servidores e deixa-os em *out (ordenados: disco.h). Demora
  * sempre wait_ms: não se sabe quantos servidores há, por isso não há "já
  * chegou a última resposta" — espera-se o tempo todo.
  *

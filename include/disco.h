@@ -162,7 +162,11 @@ int disco_parse_reply(const char *buf, size_t len, struct disco_server *out);
  * servidor que responde por duas interfaces aparece duas vezes, com os dois
  * IPs — e os dois funcionam.
  *
- * A ordem é a de chegada: o primeiro a responder costuma ser o mais perto. */
+ * A lista está sempre ORDENADA: primeiro os que têm name, por name (sem
+ * contar maiúsculas, como os nicks: proto_nick_cmp); depois os sem name; em
+ * empate pelo IP (como número: 10.0.0.9 antes de 10.0.0.10) e pela porta.
+ * Pela ordem de chegada, o mesmo servidor podia ser o 1 numa procura e o 2
+ * na seguinte; assim, os mesmos servidores dão sempre os mesmos números. */
 struct disco_list {
     struct disco_server s[DISCO_SERVERS_MAX];
     size_t              n;
@@ -170,9 +174,9 @@ struct disco_list {
 
 void disco_list_init(struct disco_list *l);
 
-/* Acrescenta `srv` à lista. Devolve:
+/* Acrescenta `srv` à lista, no lugar certo da ordem. Devolve:
  *    1  novo
- *    0  repetido: fica o lugar que já tinha, com o name e o users mais recentes
+ *    0  repetido: atualiza o name e o users (e o lugar, se o name mudou)
  *   -1  lista cheia (DISCO_SERVERS_MAX), não ficou */
 int disco_list_add(struct disco_list *l, const struct disco_server *srv);
 
