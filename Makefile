@@ -1,7 +1,7 @@
 CC      := gcc
 CFLAGS  := -std=c11 -Wall -Wextra -Wpedantic -g -Iinclude -D_POSIX_C_SOURCE=200809L -MMD -MP
 LDFLAGS := -pthread
-LDLIBS  := -lcjson    # no fim da linha de link, depois dos .o (senão o linker não resolve)
+LDLIBS  := -lcjson -lssl -lcrypto    # M6: TLS (OpenSSL)
 
 # Para apanhar bugs de memória: make SAN=1
 ifdef SAN
