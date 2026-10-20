@@ -64,11 +64,20 @@ def make_server():
     Todos os que forem criados sao encerrados (e verificados) no fim."""
     made = []
 
-    def make(*args, port=None):
-        s = Server(*args, port=port)
+    def make(*args, port=None, tls=False):
+        s = Server(*args, port=port, tls=tls)
         made.append(s)
         return s
 
     yield make
     for s in made:
         finish(s)
+
+
+@pytest.fixture
+def tls_server():
+    """M6: um servidor com as DUAS portas, a em claro (port) e a TLS
+    (tls_port), com o certificado de teste."""
+    s = Server(tls=True)
+    yield s
+    finish(s)

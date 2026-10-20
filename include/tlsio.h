@@ -26,14 +26,13 @@
  * OpenSSL é explícita: não pode ser usado por duas threads ao mesmo tempo sem
  * sincronização externa.
  *
- * Por isso, a partir do M6, o lock de cada ligação cobre LEITURA e ESCRITA —
- * mas nenhuma chamada bloqueia com ele agarrado (a espera é no
- * io_wait_readable, fora do lock). Ver docs/milestones/M6.md §D-TLS-3.
+ * Por isso, a partir do M6, com TLS o lock de cada ligação cobre LEITURA e
+ * ESCRITA — e nenhuma chamada bloqueia com ele agarrado: depois do handshake
+ * o socket é não-bloqueante, um record a meio dá IO_AGAIN, e a espera é no
+ * io_wait_readable(), fora do lock. Ver docs/milestones/M6.md §D-TLS-3.
  *
- * ESTADO: passos 1-3 do M6.md. O caminho em claro está completo e o servidor
- * já faz TLS. A protecção de concorrência (o lock a cobrir leitura E escrita,
- * sem bloquear lá dentro) é o passo 5 — até lá, um servidor TLS com VÁRIOS
- * clientes tem uma corrida no SSL*. Em claro não há nada disso.
+ * Esta camada não tem locks: serializar é com quem chama (o wlock de cada
+ * cliente no servidor, o conn_lock no cliente).
  */
 #ifndef TLSIO_H
 #define TLSIO_H
@@ -86,7 +85,7 @@ void io_peer_fingerprint(const struct conn_io *io, char *out, size_t cap);
  *
  * Tem prazo porque um cliente que liga e não fala deixaria a thread presa —
  * e, se isto fosse feito no ciclo do accept(), prendia o servidor inteiro. É
- * por isso que quem chama é a thread do cliente, nunca o accept(). M6.md §4.3c.
+ * por isso que quem chama é a thread do cliente, nunca o accept(). M6.md §3.3.
  *
  * 0 = ligação cifrada pronta (io preenchido); -1 = falhou, com o motivo em
  * *why. Em qualquer dos casos o fd NÃO é fechado: é de quem chama. */
@@ -161,22 +160,27 @@ int io_send_all(struct conn_io *io, const void *buf, size_t len, int timeout_ms)
  *
  * Com TLS fará mais do que um poll(): o SSL pode já ter bytes decifrados em
  * buffer sem que o socket tenha nada para ler (SSL_pending) — ver M6.md
- * §4.3a. É por isso que esta função existe em vez de os chamadores usarem o
+ * §3.1. É por isso que esta função existe em vez de os chamadores usarem o
  * wait_readable() diretamente com o io_fd(). */
 int io_wait_readable(struct conn_io *io, int stop_fd, long timeout_ms);
 
 /* ---- Fecho -------------------------------------------------------------- */
 
-/* Fechar só o sentido de envio: o nosso FIN segue depois do que já está no
- * buffer. É o Ctrl+D do cliente. */
+/* Fechar só o sentido de envio: o nosso FIN (e, com TLS, antes dele o
+ * close_notify) segue depois do que já está no buffer. É o Ctrl+D do cliente.
+ * Com TLS escreve no SSL*: chamar com o lock da ligação. */
 void io_shutdown_wr(struct conn_io *io);
 
 /* Fechar os dois sentidos: acorda a thread dona, que está no recv(). É o que
  * o servidor usa quando um envio esgota o prazo. */
 void io_shutdown_rw(struct conn_io *io);
 
-/* Esvaziar o que o peer ainda mandou, para que o close() saia como FIN e não
- * como RST (que faria o peer deitar fora a última resposta — M0 nota 4).
+/* O fecho do lado de quem fecha: io_shutdown_wr() (close_notify + FIN, logo a
+ * seguir à última resposta) e depois esvaziar o que o peer ainda mandou, para
+ * que o close() saia como FIN e não como RST (que faria o peer deitar fora a
+ * última resposta — M0 nota 4). Como o linger_drain() do net.c.
+ *
+ * Com TLS escreve no SSL*: ninguém mais lhe pode mexer enquanto corre.
  * Devolve 0 (o peer fechou), 1 (prazo) ou -1. NÃO fecha o fd. */
 int io_linger_drain(struct conn_io *io, long timeout_ms);
 

@@ -4,7 +4,7 @@ What **has to be agreed** with the other groups so that our client works with
 their servers and our server works with their clients — what is already
 agreed, and what does **not** need agreeing because the slides decide it.
 
-- The specification is in [`PROTOCOL.md`](PROTOCOL.md) (v0.9). This file says
+- The specification is in [`PROTOCOL.md`](PROTOCOL.md) (v0.10). This file says
   **what to ask**, what was agreed with whom, and what happens if two groups
   decide differently.
 - Every row has **our position**, implemented and tested. Each decision lives

@@ -525,7 +525,7 @@ static void usage(const char *prog)
 {
     fprintf(stderr, "uso: %s [-k segundos] [-s] [-f fingerprint] [<host> [porta] [nick]]\n"
                     "  -k  keepalive em segundos (por omissao %d; 0 desliga)\n"
-                    "  -s  ligar por TLS (a porta do servidor costuma ser 5443)\n"
+                    "  -s  ligar por TLS (a porta do servidor costuma ser 5443; precisa do host)\n"
                     "  -f  fingerprint SHA-256 do certificado do servidor (implica -s)\n"
                     "      sem ele ha cifra mas NAO ha autenticacao\n"
                     "  sem host, procura servidores na rede (UDP):\n"
@@ -665,6 +665,16 @@ int main(int argc, char *argv[])
     static char found_ip[DISCO_IP_BUF], found_port[8];
     const char *host, *port;
     if (argc < 2) {
+        /* M6: a descoberta só anuncia a porta EM CLARO (PROTOCOL.md §8,
+         * M6-3: tls_port não implementado). Com -s ligaríamos por TLS a essa
+         * porta e o erro seria um "wrong version number" que não explica
+         * nada — melhor dizer já o que fazer. */
+        if (use_tls) {
+            fprintf(stderr, "-s/-f: a descoberta so encontra a porta em claro;\n"
+                            "       indica o host e a porta TLS (ex.: %s -s <host> 5443)\n",
+                    argv[0]);
+            return EXIT_FAILURE;
+        }
         if (find_server(&dopt, found_ip, sizeof found_ip, found_port, sizeof found_port) != 0)
             return EXIT_FAILURE;
         host = found_ip;
@@ -863,7 +873,14 @@ int main(int argc, char *argv[])
         struct msg q = { .type = MT_QUIT };
         send_msg(&io, &q);                   /* se falhar, o fecho chega na mesma */
     }
+    /* M6: com TLS o io_shutdown_wr() ESCREVE no SSL* (o close_notify) — e a
+     * thread de leitura pode estar nesse instante no SSL_read. Por isso com o
+     * conn_lock, como qualquer outra escrita. Não dá o deadlock do M6.md
+     * (bug 3): com TLS a leitura só segura o lock durante um io_recv() que não
+     * bloqueia, e em claro nem o toma. */
+    pthread_mutex_lock(&conn_lock);
     io_shutdown_wr(&io);
+    pthread_mutex_unlock(&conn_lock);
     pthread_join(reader, NULL);
     status = EXIT_SUCCESS;
 

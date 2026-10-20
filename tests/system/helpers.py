@@ -11,6 +11,7 @@ import pathlib
 import select
 import signal
 import socket
+import ssl
 import subprocess
 import tempfile
 import time
@@ -39,6 +40,38 @@ def free_udp_port():
     return port
 
 
+_TLS_CERT = None
+
+
+def tls_cert():
+    """M6: (certificado, chave, fingerprint) de teste, gerados UMA vez por
+    sessao do pytest pelo proprio scripts/gen-cert.sh (assim o script tambem
+    e testado), num diretorio temporario fora do repositorio — a chave nunca
+    chega perto do git."""
+    global _TLS_CERT
+    if _TLS_CERT is None:
+        d = tempfile.mkdtemp(prefix="fn-tls-")
+        p = subprocess.run(["sh", str(ROOT / "scripts" / "gen-cert.sh"), "certs"],
+                           cwd=d, capture_output=True, text=True, timeout=30)
+        if p.returncode != 0:
+            raise RuntimeError(f"gen-cert.sh falhou:\n{p.stdout}{p.stderr}")
+        lines = p.stdout.splitlines()
+        i = next(i for i, l in enumerate(lines) if l.startswith("fingerprint SHA-256"))
+        _TLS_CERT = (os.path.join(d, "certs", "server.pem"),
+                     os.path.join(d, "certs", "server.key"), lines[i + 1].strip())
+    return _TLS_CERT
+
+
+def tls_socket(port=None, host="127.0.0.1", sock=None):
+    """Uma ligacao TLS ao nosso servidor (ou sobre `sock`, ja ligado), SEM
+    verificar o certificado: e o teste, nao o cliente — quem verifica o
+    fingerprint e o ./bin/client."""
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return ctx.wrap_socket(sock or socket.create_connection((host, port), timeout=3))
+
+
 class Server:
     """O nosso ./bin/server, num processo a parte, com o log num ficheiro.
 
@@ -51,7 +84,7 @@ class Server:
     a um servidor a serio que esteja a correr na maquina). Quem passar "-u"
     escolhe a sua."""
 
-    def __init__(self, *args, port=None):
+    def __init__(self, *args, port=None, tls=False):
         self.port = port or free_port()
         if "-u" in args:
             u = args[args.index("-u") + 1]
@@ -59,6 +92,13 @@ class Server:
         else:
             self.udp_port = free_udp_port()
             args = ("-u", str(self.udp_port), *args)
+        # M6: tls=True acrescenta a porta TLS (tls_port), com o certificado de
+        # teste (tls_cert()). A porta em claro continua la, como a serio.
+        self.tls_port = None
+        if tls:
+            cert, key, _ = tls_cert()
+            self.tls_port = free_port()
+            args = ("-T", str(self.tls_port), "-C", cert, "-K", key, *args)
         self._log = tempfile.TemporaryFile(mode="w+")
         self.proc = subprocess.Popen([SERVER, *args, str(self.port)],
                                      stdout=self._log, stderr=subprocess.STDOUT)
@@ -73,6 +113,10 @@ class Server:
             except OSError:
                 time.sleep(0.02)
         # Essa ligacao de teste aparece no log como "saiu sem nick: FIN".
+        # A porta TLS espera-se pelo log e nao com uma ligacao: um connect
+        # em claro na porta TLS seria um handshake falhado a mais no log.
+        if tls and not self.wait_log("TLS na porta"):
+            raise RuntimeError(f"o servidor nao abriu a porta TLS:\n{self.log()}")
 
     def log(self):
         self._log.seek(0)
@@ -121,13 +165,21 @@ class Conn:
         """Le o que houver ate `timeout`. False se nao chegou nada."""
         if self.closed:
             return False
-        r, _, _ = select.select([self.sock], [], [], timeout)
-        if not r:
-            return False
+        # M6: com TLS pode haver bytes JA decifrados dentro do SSL sem que o
+        # socket tenha nada (o mesmo caso do SSL_pending no servidor): o
+        # select() diria "nada" e o teste perdia mensagens que ja chegaram.
+        pending = getattr(self.sock, "pending", None)
+        if not (pending and pending() > 0):
+            r, _, _ = select.select([self.sock], [], [], timeout)
+            if not r:
+                return False
         try:
             d = self.sock.recv(65536)
         except ConnectionResetError:
             self.closed = self.reset = True
+            return False
+        except ssl.SSLError:            # M6: o TLS acabou mal (alerta, record estragado)
+            self.closed = True
             return False
         if not d:
             self.closed = True
@@ -198,9 +250,10 @@ def welcome(nick):
 OK = {"type": "OK"}
 
 
-def join(port, nick):
-    """Liga, faz NICK e consome o OK e as boas-vindas."""
-    c = Conn(port)
+def join(port, nick, tls=False):
+    """Liga, faz NICK e consome o OK e as boas-vindas. tls=True: por TLS
+    (M6), com `port` a porta TLS do servidor."""
+    c = Conn(port, sock=tls_socket(port) if tls else None)
     c.send({"type": "NICK", "nick": nick})
     got = [c.next(), c.next()]
     assert got == [OK, welcome(nick)], f"{nick} nao entrou: {got}"

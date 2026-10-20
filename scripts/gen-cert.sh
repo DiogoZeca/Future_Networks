@@ -9,10 +9,10 @@
 # É por isso que o cliente NÃO valida a cadeia (não há cadeia) e valida o
 # FINGERPRINT: o SHA-256 do certificado, que este script imprime no fim. Quem
 # se quiser ligar com segurança recebe esse fingerprint por outro meio (a
-# mensagem onde se combina o teste, o quadro da aula) e passa-o em --fp.
+# mensagem onde se combina o teste, o quadro da aula) e passa-o em -f.
 #
 # Sem isso o TLS cifrava o tráfego mas não autenticava ninguém: um atacante no
-# meio apresentava o certificado DELE e o cliente aceitava. Ver docs/milestones/M6.md §7.4.
+# meio apresentava o certificado DELE e o cliente aceitava. Ver docs/milestones/M6.md §D-TLS-2.
 #
 # Uso:
 #   scripts/gen-cert.sh [diretorio]     (por omissão: certs/)
@@ -80,4 +80,4 @@ FP=$(openssl x509 -in "$CRT" -noout -fingerprint -sha256 | cut -d= -f2)
 echo "  $FP"
 echo
 echo "para ligar:"
-echo "  ./bin/client --tls --fp $FP 127.0.0.1 5443 ana"
+echo "  ./bin/client -f $FP 127.0.0.1 5443 ana"

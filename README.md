@@ -18,7 +18,7 @@ falta acordar com os outros grupos está em [`docs/DECISIONS.md`](docs/DECISIONS
 | M3 | Comandos + spec        | DONE (semântica acordada e testada com o grupo 1; faltam mais grupos) |
 | M4 | Robustez e testes      | DONE (idle 408, Ctrl+C limpo, log, pytest) |
 | M5 | Descoberta UDP         | DONE (falta o teste em rede a sério e acertar os pormenores com os grupos) |
-| M6 | Extensão: TLS          | DONE (2 portas, pinning; faltam testes automáticos do TLS) |
+| M6 | Extensão: TLS          | DONE (2 portas, pinning; `test_tls.py`; capturas em `docs/captures/`) |
 
 Notas de cada fase em [`docs/milestones/`](docs/milestones/).
 

@@ -303,7 +303,7 @@ static void *worker_broadcast(void *arg)
         size_t n = roster_snapshot(&R, snap, ROSTER_MAX, NULL);
         for (size_t j = 0; j < n; j++) {
             /* Ler fora do lock, como faz o broadcast a serio. */
-            volatile int fd = snap[j]->fd;
+            volatile int fd = snap[j]->io.fd;   /* M6: o fd vive no conn_io */
             (void)fd;
         }
         for (size_t j = 0; j < n; j++)

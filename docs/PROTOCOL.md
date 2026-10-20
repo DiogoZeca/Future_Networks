@@ -1,4 +1,4 @@
-# Chat Protocol — v1.0
+# Chat Protocol — v0.10
 
 Shared specification for interoperability between groups (IF 2026/27).
 Message names and fields come from the course slides (slide 124) and are
@@ -449,15 +449,16 @@ These would have to be agreed first — they are **proposals**, not decisions:
 |---|---|---|
 | M6-1 | Default TLS port | `5443` |
 | M6-2 | Minimum version | TLS 1.2 |
-| M6-3 | Does `DISCOVER` advertise a `tls_port`? | yes, as an optional field (**not implemented**) |
+| M6-3 | Does `DISCOVER` advertise a `tls_port`? | yes, as an optional field (**not implemented**: discovery finds only the plaintext port, and our client refuses `-s` without a host instead of guessing) |
 | M6-4 | How is the fingerprint distributed? | out of band |
 
 ## Changelog
 
-- v1.0 — M6: TLS on a separate port (§8, §1), with self-signed certificates
+- v0.10 — M6: TLS on a separate port (§8, §1), with self-signed certificates
   and SHA-256 fingerprint pinning instead of chain validation. The plaintext
-  protocol is unchanged: this is our extension, not an agreement.
-
+  protocol is unchanged: this is our extension, not an agreement — so it does
+  NOT make this v1.0, which stays reserved for the version agreed between
+  groups (see the top of this file).
 
 - v0.9 — M5: server discovery over UDP (§7): `{"type":"DISCOVER"}` by
   broadcast to port 5001, answered only to the requester with

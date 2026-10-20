@@ -36,7 +36,7 @@ __pycache__/
 #
 # O certificado público (.pem) também fica de fora: sem a chave não serve de
 # nada, e assim não há dúvida sobre o que é seguro commitar. Quem precisar de
-# confiar no servidor usa o fingerprint (--fp), que é texto e não é segredo.
+# confiar no servidor usa o fingerprint (-f), que é texto e não é segredo.
 certs/
 *.pem
 *.key

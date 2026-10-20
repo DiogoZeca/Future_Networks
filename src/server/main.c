@@ -426,9 +426,13 @@ static enum serve_end serve(struct client *c, struct session *sess,
         }
         if (n < 0) {
             /* ECONNRESET é o cliente a desaparecer à bruta (kill -9, cabo
-             * arrancado com a pilha TCP ainda viva), não um erro nosso. */
-            snprintf(why, why_cap, "%s", errno == ECONNRESET
-                     ? "ligacao abortada (RST)" : strerror(errno));
+             * arrancado com a pilha TCP ainda viva), não um erro nosso.
+             * `dead` primeiro, como no n == 0: com TLS, o shutdown() feito
+             * pelo send_line_to() aparece aqui como erro com errno = 0, e o
+             * log dizia "saiu: Success" (M6). */
+            snprintf(why, why_cap, "%s", atomic_load(&c->dead)
+                     ? "deixou de ler (prazo de envio)"
+                     : errno == ECONNRESET ? "ligacao abortada (RST)" : strerror(errno));
             return END_PEER;
         }
 
@@ -574,6 +578,20 @@ static void *client_thread(void *arg)
      * o cliente feche também (lendo o que ainda mandar). Só então o close()
      * (no client_release) sai como FIN e não como RST. */
     if (end == END_OURS) {
+        /* M6 — fechar a porta aos outros ANTES do linger. Já saímos do roster,
+         * mas um broadcast que tirou o retrato antes ainda pode querer
+         * escrever-nos — e o io_linger_drain() lê e escreve (close_notify) no
+         * SSL* SEM lock. Marcar `dead` dentro do wlock chega: quem estava a
+         * meio de um envio acaba antes de o termos; quem está na fila vê o
+         * `dead` (send_line_to re-verifica dentro do lock) e desiste. A partir
+         * daqui só esta thread mexe na ligação.
+         *
+         * Nos dois modos, e não só com TLS: a regra fica uma só ("a fechar =
+         * ninguém escreve"), e em claro evita escritas depois do SHUT_WR. */
+        pthread_mutex_lock(&c->wlock);
+        atomic_store(&c->dead, 1);
+        pthread_mutex_unlock(&c->wlock);
+
         int r = io_linger_drain(&c->io, stop ? STOP_LINGER_MS : LINGER_MS);
         if (r == 1)
             log_debug("%s nao fechou a tempo: fecho forcado", c->who);
@@ -910,14 +928,20 @@ int main(int argc, char *argv[])
             answer_discovery(udp, tcp_port);
 
         /* De qual das portas veio? Se as duas tiverem ligações, trata-se uma
-         * por volta — o poll() volta a acordar já a seguir. */
+         * por volta — o poll() volta a acordar já a seguir. E, nesse caso,
+         * ALTERNANDO: dar sempre prioridade à porta em claro deixava a TLS à
+         * espera enquanto a outra tivesse ligações a chegar. */
+        static int prefer_tls = 0;
+        int plain_ready = pf[1].revents != 0, tls_ready = pf[3].revents != 0;
         int from_tls = 0, ready = -1;
-        if (pf[1].revents != 0) {
-            ready = listener;
-        } else if (pf[3].revents != 0) {
+        if (tls_ready && (!plain_ready || prefer_tls)) {
             ready    = tls_listener;
             from_tls = 1;
+        } else if (plain_ready) {
+            ready = listener;
         }
+        if (plain_ready && tls_ready)
+            prefer_tls = !from_tls;             /* na próxima, a outra */
         if (ready < 0)
             continue;                           /* só havia UDP */
 
@@ -974,7 +998,7 @@ int main(int argc, char *argv[])
         }
 
         /* Antes de a thread existir: só ela lê isto, por isso não precisa de
-         * lock. O handshake é feito LÁ (M6.md §4.3c). */
+         * lock. O handshake é feito LÁ (M6.md §3.3). */
         c->wants_tls = from_tls;
 
         pthread_t tid;

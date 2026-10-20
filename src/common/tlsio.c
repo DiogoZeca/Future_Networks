@@ -7,10 +7,20 @@
  *
  * Com TLS, o que muda não é só "passar pelo SSL_write em vez do send":
  *
+ *   - Depois do handshake o socket fica NÃO-BLOQUEANTE, nos dois lados. É
+ *     isso que permite segurar o lock da ligação durante um SSL_read sem o
+ *     segurar à espera (um record a meio dá WANT_READ, não bloqueia), e que
+ *     dá ao SSL_write o prazo do M4 (o buffer cheio dá WANT_WRITE, e a
+ *     espera é num poll() com prazo). Com o socket bloqueante, um cliente
+ *     que não lê, ou que manda meio record, encravava o chat (M6.md, bug 4).
+ *
  *   - SSL_read/SSL_write podem devolver WANT_READ/WANT_WRITE e pedir para
- *     serem chamados outra vez. Em modo bloqueante quase nunca acontece, mas
- *     acontece: numa renegociação, um SSL_read pode precisar de ESCREVER.
- *     É por isso que os ciclos aqui não assumem a direção.
+ *     serem chamados outra vez — e não necessariamente na direção esperada:
+ *     um SSL_read pode precisar de ESCREVER (no TLS 1.3, só para responder a
+ *     um KeyUpdate). Esse caso não tem tratamento próprio: o io_recv() dá
+ *     IO_AGAIN e quem chama volta a esperar por bytes para LER, o que pode
+ *     girar até o buffer de envio esvaziar. O nosso cliente nunca manda
+ *     KeyUpdate; fica documentado em vez de ganhar código.
  *
  *   - O TLS lê RECORDS inteiros. Um record pode trazer várias das nossas
  *     linhas: o SSL_read devolve o que lhe cabe no buffer e guarda o resto
@@ -19,7 +29,15 @@
  *     É o mesmo erro do `if` em vez de `while` do M1, uma camada abaixo —
  *     ver io_wait_readable().
  *
- * ESTADO: passo 3. A protecção de concorrência é o passo 5.
+ *   - A fila de erros do OpenSSL é POR THREAD, e o SSL_get_error() consulta-a:
+ *     se ficou lá um erro de uma ligação anterior, um simples WANT_WRITE
+ *     noutra ligação é lido como erro fatal. No servidor a mesma thread de
+ *     broadcast escreve para muitos SSL*, por isso cada operação começa com a
+ *     fila limpa (ERR_clear_error, ver "man SSL_get_error").
+ *
+ * Concorrência: um SSL* não pode ser usado por duas threads ao mesmo tempo.
+ * Esta camada NÃO tem locks — é quem chama que serializa (o wlock de cada
+ * cliente no servidor, o conn_lock no cliente). Ver M6.md §D-TLS-3.
  */
 #include "tlsio.h"
 
@@ -125,7 +143,7 @@ void *tls_server_ctx(const char *cert, const char *key, const char **why)
 
     /* PARTIAL_WRITE: sem isto, um SSL_write que devolva WANT_WRITE tem de ser
      * repetido com o MESMO ponteiro e o MESMO tamanho — o que colide com o
-     * nosso ciclo de envio, que avança o ponteiro (M6.md §4.3b).
+     * nosso ciclo de envio, que avança o ponteiro (M6.md §3.2).
      * ACCEPT_MOVING_WRITE_BUFFER: o buffer pode estar noutro sítio na segunda
      * chamada (o nosso avança dentro da mesma linha). */
     SSL_CTX_set_mode(ctx, SSL_MODE_ENABLE_PARTIAL_WRITE |
@@ -227,6 +245,7 @@ int io_tls_accept(struct conn_io *io, int fd, void *ctx, int timeout_ms,
 
     int rc = -1;
     for (;;) {
+        ERR_clear_error();                  /* ver o cabeçalho: fila POR THREAD */
         int r = SSL_accept(ssl);
         if (r == 1) {                       /* handshake feito */
             rc = 0;
@@ -246,12 +265,15 @@ int io_tls_accept(struct conn_io *io, int fd, void *ctx, int timeout_ms,
         break;
     }
 
-    set_nonblock(fd, 0);                    /* volta a bloqueante */
-
     if (rc != 0) {
+        set_nonblock(fd, 0);
         SSL_free(ssl);
         return -1;
     }
+    /* FICA não-bloqueante, como no io_tls_connect(). Até à correção do bug 4
+     * voltava aqui a bloqueante: o io_send_all() perdia o prazo (o SSL_write
+     * ficava preso com o wlock na mão, por um cliente que não lia) e o
+     * io_recv() ficava à espera do resto de um record, também com o lock. */
     io->ssl = ssl;
     return 0;
 }
@@ -347,6 +369,7 @@ int io_tls_connect(struct conn_io *io, int fd, void *ctx, const char *fp,
 
     int rc = -1;
     for (;;) {
+        ERR_clear_error();
         int r = SSL_connect(ssl);
         if (r == 1) {
             rc = 0;
@@ -393,6 +416,7 @@ ssize_t io_recv(struct conn_io *io, void *buf, size_t cap)
 
     SSL *ssl = (SSL *)io->ssl;
     for (;;) {
+        ERR_clear_error();
         int n = SSL_read(ssl, buf, (int)(cap > SSL_CHUNK_MAX ? SSL_CHUNK_MAX : cap));
         if (n > 0)
             return n;
@@ -424,6 +448,7 @@ int io_send_all(struct conn_io *io, const void *buf, size_t len, int timeout_ms)
     long        deadline = timeout_ms >= 0 ? now_ms() + timeout_ms : 0;
 
     while (len > 0) {
+        ERR_clear_error();                  /* a thread do broadcast escreve para muitos SSL* */
         int n = SSL_write(ssl, p, (int)(len > SSL_CHUNK_MAX ? SSL_CHUNK_MAX : len));
         if (n > 0) {
             p   += n;
@@ -458,7 +483,7 @@ int io_wait_readable(struct conn_io *io, int stop_fd, long timeout_ms)
     /* O PASSO QUE NÃO PODE FALTAR: com TLS pode haver bytes JÁ DECIFRADOS no
      * buffer do SSL sem que o socket tenha nada para ler. O poll() diria
      * "nada" e o ciclo adormecia com mensagens à espera — o mesmo erro do
-     * `if` em vez de `while` do M1, uma camada abaixo (M6.md §4.3a). */
+     * `if` em vez de `while` do M1, uma camada abaixo (M6.md §3.1). */
     if (io->ssl != NULL && SSL_pending((SSL *)io->ssl) > 0)
         return NET_READY;
 
@@ -473,9 +498,15 @@ void io_shutdown_wr(struct conn_io *io)
         return;
     /* Com TLS, o "fim de dados" é o close_notify, não o FIN. Mandamo-lo e
      * fechamos o nosso lado de envio na mesma: o peer vê os dois. Não se
-     * espera pelo close_notify DELE — isso é com o io_linger_drain. */
-    if (io->ssl != NULL)
+     * espera pelo close_notify DELE — isso é com o io_linger_drain.
+     *
+     * O socket é não-bloqueante: com o buffer de envio cheio o SSL_shutdown
+     * dá WANT_WRITE e o close_notify não sai. Não se insiste — o FIN sai na
+     * mesma, e o peer vê o fecho (sem close_notify, como um "ragged EOF"). */
+    if (io->ssl != NULL) {
+        ERR_clear_error();
         SSL_shutdown((SSL *)io->ssl);
+    }
     shutdown(io->fd, SHUT_WR);
 }
 
@@ -489,6 +520,15 @@ int io_linger_drain(struct conn_io *io, long timeout_ms)
 {
     if (io->ssl == NULL)
         return linger_drain(io->fd, timeout_ms);
+
+    /* Primeiro o mesmo que o linger_drain() faz em claro: dizer que acabou,
+     * para a resposta (o OK ao QUIT, o 413...) ser seguida do fim LOGO. Com
+     * TLS isso é o close_notify e depois o FIN. Sem isto o cliente não sabia
+     * que tínhamos fechado e o fecho só saía ao fim do prazo (M6.md, bug 5).
+     *
+     * Escreve no SSL*: quem chama tem de garantir que mais ninguém lhe mexe
+     * (o servidor marca o cliente `dead` dentro do wlock antes de chamar). */
+    io_shutdown_wr(io);
 
     /* Com TLS os bytes do socket são records cifrados: lê-los em bruto não
      * diz nada. Esvazia-se pelo SSL_read, que também trata o close_notify. */
