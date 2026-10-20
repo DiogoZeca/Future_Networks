@@ -26,3 +26,21 @@ vgcore.*
 # Python (testes black-box com pytest no M4)
 __pycache__/
 .pytest_cache/
+
+# M6 — TLS. NADA de material criptográfico no repositório.
+#
+# A chave privada do servidor NUNCA pode ser commitada: quem a tiver pode
+# fazer-se passar pelo servidor, e uma chave que esteve num repositório está
+# comprometida para sempre (fica no histórico mesmo depois de apagada).
+# Cada máquina gera o seu par com scripts/gen-cert.sh.
+#
+# O certificado público (.pem) também fica de fora: sem a chave não serve de
+# nada, e assim não há dúvida sobre o que é seguro commitar. Quem precisar de
+# confiar no servidor usa o fingerprint (--fp), que é texto e não é segredo.
+certs/
+*.pem
+*.key
+*.crt
+*.csr
+*.p12
+*.pfx
