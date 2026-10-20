@@ -31,12 +31,14 @@
  * o socket é não-bloqueante, um record a meio dá IO_AGAIN, e a espera é no
  * io_wait_readable(), fora do lock. Ver docs/milestones/M6.md §D-TLS-3.
  *
- * Esta camada não tem locks: serializar é com quem chama (o wlock de cada
- * cliente no servidor, o conn_lock no cliente).
+ * Esta camada não tem locks seus: serializar é com quem chama (o wlock de
+ * cada cliente no servidor, o ssl_lock no cliente). A única que mexe num lock
+ * é o io_send_all_shared(), e é o de quem chama, que ela larga para esperar.
  */
 #ifndef TLSIO_H
 #define TLSIO_H
 
+#include <pthread.h>
 #include <stddef.h>
 #include <sys/types.h>
 
@@ -141,8 +143,9 @@ int io_fd(const struct conn_io *io);
 ssize_t io_recv(struct conn_io *io, void *buf, size_t cap);
 
 /* Envia os len bytes todos.
- *   timeout_ms < 0   espera o que for preciso (o CLIENTE, que só escreve
- *                    para o servidor) — é o send_all() de sempre
+ *   timeout_ms < 0   espera o que for preciso — é o send_all() de sempre.
+ *                    Com TLS espera COM o lock de quem chama: o cliente
+ *                    usa o io_send_all_shared() (abaixo)
  *   timeout_ms >= 0  prazo TOTAL para a linha inteira (o SERVIDOR, que não
  *                    pode ficar preso por um cliente que não lê)
  *
@@ -154,6 +157,17 @@ ssize_t io_recv(struct conn_io *io, void *buf, size_t cap);
  * ter saído PARTE da linha, e o stream do peer fica corrompido sem remédio.
  * Quem chama TEM de deixar de escrever nesse socket e fechar a ligação. */
 int io_send_all(struct conn_io *io, const void *buf, size_t len, int timeout_ms);
+
+/* Como io_send_all(io, buf, len, -1) — sem prazo —, para quem PARTILHA o SSL*
+ * com uma thread que está a ler (o cliente). `ssl_lock` é tomado à volta de
+ * cada SSL_write e LARGADO enquanto se espera por espaço no buffer, para que
+ * a leitura continue entretanto (M6.md §4, bug 7). Quem chama NÃO o tem.
+ *
+ * Não impede outra linha de se meter a meio desta: isso é com quem chama
+ * (outro lock, à volta da linha inteira). Em claro `ssl_lock` não é usado.
+ * 0 = enviado tudo; -1 = erro (o peer já foi). */
+int io_send_all_shared(struct conn_io *io, const void *buf, size_t len,
+                       pthread_mutex_t *ssl_lock);
 
 /* Esperar por bytes com prazo, acordando se o servidor encerrar (stop_fd).
  * Devolve NET_READY, NET_TIMEOUT, NET_STOP ou -1, como o wait_readable().

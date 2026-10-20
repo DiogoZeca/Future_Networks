@@ -36,8 +36,9 @@
  *     fila limpa (ERR_clear_error, ver "man SSL_get_error").
  *
  * Concorrência: um SSL* não pode ser usado por duas threads ao mesmo tempo.
- * Esta camada NÃO tem locks — é quem chama que serializa (o wlock de cada
- * cliente no servidor, o conn_lock no cliente). Ver M6.md §D-TLS-3.
+ * Esta camada NÃO tem locks seus — é quem chama que serializa (o wlock de cada
+ * cliente no servidor, o ssl_lock no cliente). O io_send_all_shared() recebe o
+ * de quem chama, para o poder largar durante a espera. Ver M6.md §D-TLS-3.
  */
 #include "tlsio.h"
 
@@ -45,6 +46,7 @@
 #include <openssl/ssl.h>
 #include <openssl/x509.h>
 
+#include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
 #include <stdio.h>
@@ -474,6 +476,54 @@ int io_send_all(struct conn_io *io, const void *buf, size_t len, int timeout_ms)
             continue;
         }
         return -1;
+    }
+    return 0;
+}
+
+int io_send_all_shared(struct conn_io *io, const void *buf, size_t len,
+                       pthread_mutex_t *ssl_lock)
+{
+    if (io->ssl == NULL)
+        return send_all(io->fd, buf, len);  /* em claro não há SSL* a proteger */
+
+    /* O io_send_all() acima espera pelo espaço no buffer COM o lock de quem
+     * chama na mão — no servidor isso está certo (o prazo é de 5 s e quem não
+     * lê é desligado). No cliente, a espera é sem prazo e o lock é o mesmo de
+     * que a thread de leitura precisa para o SSL_read: enquanto se esperava
+     * para escrever, deixava-se de ler (M6.md §4, bug 7).
+     *
+     * Aqui o lock cobre só cada SSL_write (e o SSL_get_error, que lê o
+     * estado do mesmo SSL*), e é LARGADO durante a espera. Entre duas
+     * tentativas o SSL_read da outra thread pode correr: um SSL* não-
+     * bloqueante aceita leituras e escritas intercaladas, desde que nunca ao
+     * mesmo tempo. Que outra linha não se meta a meio desta é com quem chama
+     * (o send_lock do cliente). */
+    SSL        *ssl = (SSL *)io->ssl;
+    const char *p   = buf;
+
+    while (len > 0) {
+        pthread_mutex_lock(ssl_lock);
+        ERR_clear_error();
+        int n = SSL_write(ssl, p, (int)(len > SSL_CHUNK_MAX ? SSL_CHUNK_MAX : len));
+        int e = n > 0 ? SSL_ERROR_NONE : SSL_get_error(ssl, n);
+        pthread_mutex_unlock(ssl_lock);
+
+        if (n > 0) {
+            p   += n;
+            len -= (size_t)n;
+            continue;
+        }
+        if (e != SSL_ERROR_WANT_READ && e != SSL_ERROR_WANT_WRITE)
+            return -1;
+
+        /* Esperar FORA do lock, às fatias de 200 ms: entretanto a thread de
+         * leitura pode ter mexido no estado do SSL (e o que ele pede pode ter
+         * mudado), por isso volta-se sempre a tentar o SSL_write em vez de
+         * confiar numa só espera longa. EINTR (um Ctrl+C) é só voltar. */
+        struct pollfd pf = { .fd = io->fd,
+                             .events = (e == SSL_ERROR_WANT_WRITE) ? POLLOUT : POLLIN };
+        if (poll(&pf, 1, 200) < 0 && errno != EINTR)
+            return -1;
     }
     return 0;
 }

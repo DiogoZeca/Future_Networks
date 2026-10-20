@@ -93,8 +93,8 @@
  *     mesma "morte silenciosa" que o idle timeout apanha do lado do servidor.
  *     O cliente avisa e termina, em vez de ficar à espera para sempre.
  *   - Agora há duas threads a escrever no socket (a principal e a do
- *     keepalive): o send_msg() passou a ter um lock (conn_lock), como o
- *     wlock de cada cliente no servidor.
+ *     keepalive): o send_msg() passou a ter um lock (send_lock), como o
+ *     wlock de cada cliente no servidor. (No M6 juntou-se-lhe o ssl_lock.)
  *   - Ctrl+C (e SIGTERM/SIGHUP): sai como o /quit — manda QUIT e espera o
  *     fecho. Um segundo Ctrl+C termina logo (term.c).
  *
@@ -164,16 +164,25 @@ static _Atomic int quitting = 0;
 
 static long now_ms(void);   /* definido abaixo; preciso no read_line */
 
-/* M6 — cobre a ligação INTEIRA, não só os envios (era o send_lock até aqui).
+/* Dois locks, com papéis diferentes (M6.md §D-TLS-3 e §4, bug 7):
  *
- * Em TCP os dois sentidos são independentes e a thread de leitura não
- * precisava de lock nenhum. Com TLS, o SSL* é um objeto único: ler numa
- * thread enquanto outra escreve é comportamento indefinido. O "cliente com
- * zero locks" do M2 acabou aqui (M6.md §D-TLS-3).
+ * send_lock — serializa quem escreve LINHAS (a thread principal e a do
+ *   keepalive), para que uma linha nunca se meta a meio de outra; protege
+ *   também o last_sent. É o lock do M4, em claro e com TLS. Pode ser
+ *   segurado durante uma espera longa (buffer de envio cheio): só os outros
+ *   escritores esperam por ele.
  *
- * Nenhuma chamada bloqueia com ele agarrado: com TLS o socket é
- * não-bloqueante e o io_recv() devolve IO_AGAIN. */
-static pthread_mutex_t conn_lock = PTHREAD_MUTEX_INITIALIZER;
+ * ssl_lock — só com TLS: protege o SSL*, que é um objeto único e não pode
+ *   ser usado por duas threads ao mesmo tempo. O "cliente com zero locks" do
+ *   M2 acabou aqui. Cobre CADA operação no SSL* (SSL_read, SSL_write,
+ *   SSL_shutdown) e NUNCA uma espera: o socket é não-bloqueante, o io_recv()
+ *   dá IO_AGAIN, e o io_send_all_shared() larga-o enquanto espera por espaço.
+ *   É isso que deixa a thread de leitura ler enquanto a principal espera para
+ *   escrever.
+ *
+ * Ordem: send_lock antes de ssl_lock, nunca ao contrário. */
+static pthread_mutex_t send_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t ssl_lock  = PTHREAD_MUTEX_INITIALIZER;
 
 /* Lê UMA linha do servidor.
  *   1 = linha em line/len | 0 = timeout | -2 = o servidor fechou (FIN)
@@ -212,10 +221,10 @@ static int read_line(struct conn_io *io, char *line, size_t *len, long timeout_m
          * espera de bytes que só chegam depois dele). */
         int locked = io_is_tls(io);
         if (locked)
-            pthread_mutex_lock(&conn_lock);
+            pthread_mutex_lock(&ssl_lock);
         ssize_t n = io_recv(io, chunk, sizeof chunk);
         if (locked)
-            pthread_mutex_unlock(&conn_lock);
+            pthread_mutex_unlock(&ssl_lock);
 
         if (n == IO_AGAIN) {
             /* TLS: não há record completo. Esperar FORA do lock, para não
@@ -300,7 +309,7 @@ static size_t          pending_head = 0, pending_n = 0;
 static long            ka_since     = 0;      /* ms do keepalive por responder (0 = nenhum) */
 
 /* Duas threads escrevem no socket (a principal e a do keepalive). */
-static long            last_sent = 0;         /* ms do último envio (conn_lock) */
+static long            last_sent = 0;         /* ms do último envio (send_lock) */
 
 static long keepalive_ms = KEEPALIVE_S * 1000L;
 
@@ -327,7 +336,7 @@ static int users_is_silent(void)
     return silent;
 }
 
-/* Codifica e envia, com o conn_lock JÁ agarrado. Um LIST entra na fila ANTES
+/* Codifica e envia, com o send_lock JÁ agarrado (e o ssl_lock NÃO). Um LIST entra na fila ANTES
  * de sair (a resposta não pode chegar antes de ele lá estar). -1 = sair. */
 static int send_msg_locked(struct conn_io *io, const struct msg *m, int silent)
 {
@@ -349,7 +358,9 @@ static int send_msg_locked(struct conn_io *io, const struct msg *m, int silent)
         pthread_mutex_unlock(&lists_lock);
     }
     last_sent = now_ms();
-    if (io_send_all(io, line, len, -1) < 0) {   /* -1: o cliente espera o que for preciso */
+    /* Sem prazo (o cliente espera o que for preciso), e com TLS a largar o
+     * ssl_lock durante a espera: a thread de leitura continua a ler. */
+    if (io_send_all_shared(io, line, len, &ssl_lock) < 0) {
         term_out(stderr, "send: %s", strerror(errno));
         return -1;
     }
@@ -358,9 +369,9 @@ static int send_msg_locked(struct conn_io *io, const struct msg *m, int silent)
 
 static int send_msg(struct conn_io *io, const struct msg *m)
 {
-    pthread_mutex_lock(&conn_lock);
+    pthread_mutex_lock(&send_lock);
     int rc = send_msg_locked(io, m, 0);
-    pthread_mutex_unlock(&conn_lock);
+    pthread_mutex_unlock(&send_lock);
     return rc;
 }
 
@@ -400,12 +411,12 @@ static void *keepalive_thread(void *arg)
             term_exit(EXIT_FAILURE);          /* NÃO exit(): ver term.h */
         }
 
-        pthread_mutex_lock(&conn_lock);
+        pthread_mutex_lock(&send_lock);
         if (!quitting && since == 0 && now - last_sent >= keepalive_ms) {
             struct msg l = { .type = MT_LIST };
             send_msg_locked(io, &l, 1);       /* se falhar, o leitor vê o fecho */
         }
-        pthread_mutex_unlock(&conn_lock);
+        pthread_mutex_unlock(&send_lock);
     }
     pthread_mutex_unlock(&ka_lock);
     return NULL;
@@ -776,9 +787,9 @@ int main(int argc, char *argv[])
     pthread_cond_init(&ka_cond, &ca);
     pthread_condattr_destroy(&ca);
 
-    pthread_mutex_lock(&conn_lock);
+    pthread_mutex_lock(&send_lock);
     last_sent = now_ms();                   /* o NICK acabou de sair */
-    pthread_mutex_unlock(&conn_lock);
+    pthread_mutex_unlock(&send_lock);
 
     term_hold_signals();
     int rc = pthread_create(&reader, NULL, reader_thread, &io);
@@ -875,12 +886,12 @@ int main(int argc, char *argv[])
     }
     /* M6: com TLS o io_shutdown_wr() ESCREVE no SSL* (o close_notify) — e a
      * thread de leitura pode estar nesse instante no SSL_read. Por isso com o
-     * conn_lock, como qualquer outra escrita. Não dá o deadlock do M6.md
-     * (bug 3): com TLS a leitura só segura o lock durante um io_recv() que não
-     * bloqueia, e em claro nem o toma. */
-    pthread_mutex_lock(&conn_lock);
+     * ssl_lock, como qualquer outra operação no SSL*. Não dá o deadlock do
+     * M6.md (bug 3): com TLS a leitura só segura o lock durante um io_recv()
+     * que não bloqueia, e em claro nem o toma. */
+    pthread_mutex_lock(&ssl_lock);
     io_shutdown_wr(&io);
-    pthread_mutex_unlock(&conn_lock);
+    pthread_mutex_unlock(&ssl_lock);
     pthread_join(reader, NULL);
     status = EXIT_SUCCESS;
 

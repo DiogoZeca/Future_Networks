@@ -149,7 +149,13 @@ def lixo(rng):
     elif tipo == 4:                                     # UTF-8 invalido
         b = b'{"type":"MSG","text":"\xc3\x28\xff"}'
     elif tipo == 5:                                     # numeros enormes
-        b = b'{"type":"MSG","text":"x","n":' + b"9" * 400 + b"}"
+        # O numero vai no "text", que tem de ser string: e 400 com qualquer
+        # cJSON. Ate ao M6 ia num campo a mais ("n":999...), e ai a resposta
+        # dependia da VERSAO do cJSON: ate a 1.7.18 um numero com mais de 63
+        # caracteres e JSON invalido (400); a partir da 1.7.19 (que alocou o
+        # buffer) e um MSG valido com um campo desconhecido, que a spec manda
+        # ignorar (OK + CHAT) — e o teste falhava no Arch e passava no Ubuntu.
+        b = b'{"type":"MSG","text":' + b"9" * 400 + b"}"
     elif tipo == 6:                                     # NUL no meio
         b = b'{"type":"MSG",\x00"text":"x"}'
     else:                                               # duas mensagens numa linha

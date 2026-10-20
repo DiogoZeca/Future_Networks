@@ -5,7 +5,7 @@ O servidor e o cliente **a sério**, com ligações TCP reais, em pytest (slide
 
 ```sh
 make pytest                                   # tudo (~2,5 min)
-make pytest PYTEST_ARGS='-m "not slow"'       # sem os 5 demorados
+make pytest PYTEST_ARGS='-m "not slow"'       # sem os 6 demorados
 make clean && make pytest SAN=1               # com ASan/UBSan/LeakSanitizer
 python3 -m pytest tests/system/test_interop.py --host <ip> --port 5000
                                               # os cenários contra outro grupo

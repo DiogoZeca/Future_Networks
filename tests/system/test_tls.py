@@ -17,9 +17,11 @@ O certificado de teste e gerado uma vez pelo proprio scripts/gen-cert.sh,
 num diretorio temporario (helpers.tls_cert()).
 """
 import os
+import re
 import select
 import signal
 import socket
+import ssl
 import subprocess
 import threading
 import time
@@ -193,6 +195,69 @@ def test_o_cliente_mostra_logo_uma_linha_maior_do_que_o_chunk(tls_server):
         assert big.encode() in out
     finally:
         p.communicate(b"/quit\n", timeout=10)
+
+
+@pytest.mark.slow
+def test_o_cliente_continua_a_ler_enquanto_espera_para_escrever():
+    """M6.md §4, bug 7. Contra um servidor TLS falso que NUNCA le mas vai
+    mandando "tick N": o nosso cliente recebe megabytes no stdin e o buffer
+    de envio enche. Antes da correcao, a thread principal esperava pelo
+    espaco COM o lock da ligacao, e a de leitura — que precisa do mesmo lock
+    para o SSL_read — deixava de mostrar os ticks. Agora a espera e fora do
+    lock: os ticks continuam a aparecer."""
+    cert, key, fp = tls_cert()
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(cert, key)
+    lst = socket.socket()
+    lst.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)   # enche depressa
+    lst.bind(("127.0.0.1", 0))
+    lst.listen(1)
+    port = lst.getsockname()[1]
+    parar = threading.Event()
+
+    def falso():
+        raw, _ = lst.accept()
+        with ctx.wrap_socket(raw, server_side=True) as s:
+            buf = b""
+            while b"\n" not in buf:                 # o NICK; e mais nada se le
+                buf += s.recv(4096)
+            s.sendall(b'{"type":"OK"}\n')
+            i = 0
+            while not parar.is_set():
+                s.sendall(b'{"type":"CHAT","from":"srv","text":"tick %d","private":false}\n' % i)
+                i += 1
+                time.sleep(0.1)
+
+    threading.Thread(target=falso, daemon=True).start()
+    p = subprocess.Popen([CLIENT, "-k", "0", "-f", fp, "127.0.0.1", str(port), "ana"],
+                         stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                         stderr=subprocess.DEVNULL, bufsize=0)  # sem flush no fim
+    linha = ("x" * 4000 + "\n").encode()
+
+    def escritor():                                 # ~20 MB: muito mais do que os buffers
+        try:
+            for _ in range(5000):
+                p.stdin.write(linha)
+        except (BrokenPipeError, ValueError, OSError):
+            pass
+
+    threading.Thread(target=escritor, daemon=True).start()
+    try:
+        out, fim = b"", time.time() + 8
+        # Primeiro, dar tempo a que o envio fique mesmo preso (buffers cheios)...
+        time.sleep(3)
+        # ... e depois os ticks TEM de continuar a chegar.
+        while time.time() < fim:
+            if select.select([p.stdout], [], [], 0.1)[0]:
+                out += os.read(p.stdout.fileno(), 65536)
+        assert b"tick" in out
+        ticks = [int(t) for t in re.findall(rb"tick (\d+)", out)]
+        assert max(ticks) >= 70, f"o cliente parou de ler no tick {max(ticks)}"
+    finally:
+        parar.set()
+        p.kill()
+        p.wait()
+        lst.close()
 
 
 # ---- o que o M4 ja garantia, agora por TLS ----------------------------------
