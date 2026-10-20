@@ -1,4 +1,4 @@
-# Chat Protocol — v0.9
+# Chat Protocol — v1.0
 
 Shared specification for interoperability between groups (IF 2026/27).
 Message names and fields come from the course slides (slide 124) and are
@@ -20,6 +20,9 @@ against any server with `python3 scripts/interop.py <host> <port>`.
 
 - TCP. Default port: **AGREED** `5000` (group 1 uses 5000 too).
 - Server discovery (M5): UDP broadcast, port `5001` — see §7.
+- **TLS (M6): a SEPARATE port, `5443` by default — see §8.** The plaintext
+  port keeps working unchanged; TLS is an extra door, never a replacement.
+  Only our group chose this extension, so nothing here affects interop.
 - **(slides, slide 85)** IPv4 and IPv6: *"Use getaddrinfo() and
   sockaddr_storage for IPv4 / IPv6 portability"*. Our server listens on both
   in a single dual-stack socket (`::` with `IPV6_V6ONLY=0`; on a machine
@@ -401,7 +404,60 @@ server 192.168.1.10:5001   →  192.168.1.23:41234     {"type":"SERVER","tcp_por
 client: TCP connect to 192.168.1.10:5000, then NICK as usual (§3)
 ```
 
+## 8. TLS (M6) — our extension
+
+Slide 123 lists *"TLS with a self-signed certificate"* as one of four possible
+extensions. **Only our group picked it**, so this section describes what we do,
+not something agreed between groups. Nothing here changes the plaintext
+protocol: a server with TLS enabled behaves on port 5000 exactly as before.
+
+### Transport
+
+| | |
+|---|---|
+| Port | `5443` by default (`-T`); **separate** from the plaintext port |
+| Version | TLS 1.2 minimum; 1.3 when both sides support it |
+| Certificate | self-signed, generated per machine by `scripts/gen-cert.sh` |
+| Inside TLS | exactly the same newline-delimited JSON as §2 |
+
+A client that speaks TLS to port 5000, or plaintext to 5443, gets a clean
+error, not a hang.
+
+### Authentication: fingerprint pinning
+
+A self-signed certificate cannot be validated against any authority, so **chain
+validation is disabled on purpose** and replaced by a check our client does
+itself: the SHA-256 of the server certificate must match what the user passed
+in `-f`.
+
+```sh
+./bin/client -s -f 52:59:68:E4:...:29 127.0.0.1 5443 ana
+```
+
+Without `-f` the connection is still encrypted, but **nobody is
+authenticated** — a man in the middle would present its own certificate and be
+accepted. The client says so explicitly and prints the fingerprint it saw.
+
+The fingerprint travels out of band (the message where the test is arranged,
+the board in class); `scripts/gen-cert.sh` prints it on the server side.
+
+### If another group ever wants to interoperate over TLS
+
+These would have to be agreed first — they are **proposals**, not decisions:
+
+| # | Question | Our proposal |
+|---|---|---|
+| M6-1 | Default TLS port | `5443` |
+| M6-2 | Minimum version | TLS 1.2 |
+| M6-3 | Does `DISCOVER` advertise a `tls_port`? | yes, as an optional field (**not implemented**) |
+| M6-4 | How is the fingerprint distributed? | out of band |
+
 ## Changelog
+
+- v1.0 — M6: TLS on a separate port (§8, §1), with self-signed certificates
+  and SHA-256 fingerprint pinning instead of chain validation. The plaintext
+  protocol is unchanged: this is our extension, not an agreement.
+
 
 - v0.9 — M5: server discovery over UDP (§7): `{"type":"DISCOVER"}` by
   broadcast to port 5001, answered only to the requester with

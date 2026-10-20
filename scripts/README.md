@@ -69,3 +69,31 @@ python3 scripts/discover.py --to 192.168.1.20     # um servidor só (unicast)
 < 192.168.1.23:5001  b'{"type":"SERVER","tcp_port":5000,"name":"g1","users":2}\n'
     ok: porta TCP 5000 via 'tcp_port'
 ```
+
+---
+
+## `gen-cert.sh`
+
+Gera o certificado auto-assinado e a chave do servidor (M6), e imprime o
+**fingerprint SHA-256** — que é o que o cliente precisa para autenticar.
+
+```sh
+scripts/gen-cert.sh             # -> certs/server.pem, certs/server.key
+```
+
+```
+fingerprint SHA-256 (e isto que o cliente precisa):
+  52:59:68:E4:98:3B:0B:07:...
+```
+
+**Recusa correr se o `.gitignore` não proteger o `certs/`.** Não é zelo a mais:
+uma chave privada que entre no histórico do git fica comprometida para sempre,
+mesmo depois de apagada. Por isso a ordem é sempre `.gitignore` primeiro.
+
+A chave sai com `chmod 600` e **nunca** é commitada — cada máquina gera a sua.
+Para ligar:
+
+```sh
+./bin/server -T 5443 5000
+./bin/client -s -f <fingerprint> 127.0.0.1 5443 ana
+```

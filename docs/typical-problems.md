@@ -149,6 +149,7 @@ desligar?"*. São quatro cenários distintos, com sintomas diferentes.
 - **Estado:** `Resolvido` - `MSG_NOSIGNAL` em `send_all()`; verificado experimentalmente nos dois sentidos.
 - **Visto de novo no M1, do nosso lado:** ao recusar uma linha demasiado longa, o servidor fecha com bytes do cliente **ainda por ler** - e o kernel manda RST. Se o RST chegar antes de o cliente ler o `ERROR "line too long"`, o cliente nunca o vê. Resolver exige continuar a ler (e deitar fora) durante algum tempo antes de fechar, o que precisa de timeouts - **M4**.
 - **Resolvido no M4:** `linger_drain()` sempre que é o servidor a fechar (413, `QUIT`, 408, 503, encerramento): `shutdown(SHUT_WR)` (o FIN sai depois da última resposta) e ler e deitar fora até o cliente fechar, no máximo 2 s. Prova: `test_robustness.py`, 413 e `QUIT`+lixo 20 vezes cada, sempre a resposta e FIN; mutação 8 do M4.md (sem o linger, falha logo na 1.ª ronda).
+- **Voltou no M6, por outra porta:** o `MSG_NOSIGNAL` protege os **nossos** `send()`. O OpenSSL escreve com `write()`, que não tem essa flag - e um cliente que recusa o fingerprint e fecha matava o servidor com `SIGPIPE` (exit 141), apesar de todo o cuidado que já lá estava. **A defesa antiga não cobre escritas que não são nossas.** Resolvido com `signal(SIGPIPE, SIG_IGN)` no arranque do servidor e do cliente: o `write()` passa a devolver `EPIPE`, que o código já sabia tratar.
 
 ### 2.3 Morte silenciosa - cabo desligado, Wi-Fi caído, máquina sem energia
 
@@ -212,6 +213,15 @@ desligar?"*. São quatro cenários distintos, com sintomas diferentes.
 - **Porquê:** "o nick está livre?" e "guardar o nick" são duas operações. Cada uma com o lock está correta; entre as duas, outra thread faz a mesma pergunta e recebe a mesma resposta. Proteger cada acesso não protege uma decisão que depende de dois.
 - **Como evitar:** a decisão e a escrita no **mesmo** lock (uma só função). E contar como "em uso" quem já reservou mas ainda não entrou no chat.
 - **Estado:** `Resolvido` - **M3**: `roster_claim()`. Prova: `test_roster` #18 (16 threads × 200 rondas; a mutação com dois locks falha 36/200), `probe_m3.py` §1.
+
+
+### 3.7 Uma protecção posta "por via das dúvidas" pode ser pior (M6)
+
+- **Sintoma:** o cliente deixou de sair. Imprimia tudo, e ficava preso para sempre no fim.
+- **Porquê:** ao pôr TLS, o lock da ligação passou a cobrir a **leitura** além da escrita - porque um `SSL*` não pode ser usado por duas threads ao mesmo tempo. Só que o lock foi posto **sempre**, também em claro. E em claro o `io_recv()` é bloqueante: a thread de leitura segurava o lock à espera de bytes, enquanto a thread principal esperava o mesmo lock para mandar o `QUIT` - que era exactamente o que faria os bytes chegarem. Deadlock.
+- **Como evitar:** o lock só onde é preciso - **com TLS**. Em TCP os dois sentidos são independentes e o kernel trata deles em separado; foi por isso que o cliente do M2 não precisava de lock nenhum.
+- **A lição:** um lock a mais não é conservadorismo barato. Transformou um caminho que funcionava desde o M2 num deadlock, e só apareceu no fecho - o sítio onde menos se olha.
+- **Estado:** `Resolvido` - **M6**: `int locked = io_is_tls(io);` nos dois lados.
 
 ---
 

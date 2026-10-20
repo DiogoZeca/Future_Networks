@@ -18,7 +18,7 @@ falta acordar com os outros grupos está em [`docs/DECISIONS.md`](docs/DECISIONS
 | M3 | Comandos + spec        | DONE (semântica acordada e testada com o grupo 1; faltam mais grupos) |
 | M4 | Robustez e testes      | DONE (idle 408, Ctrl+C limpo, log, pytest) |
 | M5 | Descoberta UDP         | DONE (falta o teste em rede a sério e acertar os pormenores com os grupos) |
-| M6 | Extensão               | TODO |
+| M6 | Extensão: TLS          | DONE (2 portas, pinning; faltam testes automáticos do TLS) |
 
 Notas de cada fase em [`docs/milestones/`](docs/milestones/).
 
@@ -56,19 +56,39 @@ scripts/         interop.py: os cenários contra qualquer servidor;
 
 ## Compilar e correr
 
-Dependência: [cJSON](https://github.com/DaveGamble/cJSON) para o JSON.
+Dependências: [cJSON](https://github.com/DaveGamble/cJSON) para o JSON e
+OpenSSL para o TLS (M6).
 
 ```sh
-sudo pacman -S cjson            # Arch
-sudo apt install libcjson-dev   # Ubuntu/Debian
+sudo pacman -S cjson openssl                # Arch
+sudo apt install libcjson-dev libssl-dev    # Ubuntu/Debian
 make            # compila para bin/
 ./bin/server 5000               # [-v | -q] [-i inatividade s] [-n prazo do NICK s]
                                 #   [-u porta UDP da descoberta (5001; 0 desliga)] [-N nome]
+                                #   [-T porta TLS] [-C certificado] [-K chave]
 ./bin/client                    # sem endereço: procura os servidores da rede e escolhe-se um
 ./bin/client <ip> 5000 ana      # o nick é pedido se não for dado; [-k keepalive s]
+./bin/client -s -f <fp> <ip> 5443 ana   # por TLS (M6), com o fingerprint do servidor
 make test       # testes unitários (make test SAN=1 com sanitizers)
 make pytest     # testes de sistema (precisa do pytest: sudo apt install python3-pytest)
 ```
+
+**TLS (M6).** Uma porta **a mais**, nunca em vez de: o chat em claro continua
+igual, e é por ele que se faz a interoperabilidade com os outros grupos (só o
+nosso escolheu esta extensão).
+
+```sh
+scripts/gen-cert.sh             # gera certs/ e imprime o fingerprint SHA-256
+./bin/server -T 5443 5000       # as duas portas ao mesmo tempo
+./bin/client -s -f <fingerprint> 127.0.0.1 5443 ana
+```
+
+O certificado é auto-assinado, por isso não há autoridade que o valide: quem
+autentica o servidor é o **fingerprint** (`-f`). Sem ele a ligação é cifrada
+mas **não autenticada**, e o cliente avisa. A chave privada nunca entra no
+repositório — o `gen-cert.sh` recusa correr se o `.gitignore` não a proteger.
+
+Detalhes em [`docs/milestones/M6.md`](docs/milestones/M6.md) e `PROTOCOL.md` §8.
 
 **Descoberta (M5).** O servidor responde a um `DISCOVER` por broadcast UDP na
 porta 5001 com a sua porta TCP, o nome (`-N`, por omissão o hostname) e
