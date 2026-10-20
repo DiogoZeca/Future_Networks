@@ -93,7 +93,7 @@
  *     mesma "morte silenciosa" que o idle timeout apanha do lado do servidor.
  *     O cliente avisa e termina, em vez de ficar à espera para sempre.
  *   - Agora há duas threads a escrever no socket (a principal e a do
- *     keepalive): o send_msg() passou a ter um lock (send_lock), como o
+ *     keepalive): o send_msg() passou a ter um lock (conn_lock), como o
  *     wlock de cada cliente no servidor.
  *   - Ctrl+C (e SIGTERM/SIGHUP): sai como o /quit — manda QUIT e espera o
  *     fecho. Um segundo Ctrl+C termina logo (term.c).
@@ -123,11 +123,13 @@
 #include "net.h"
 #include "protocol.h"
 #include "term.h"
+#include "tlsio.h"
 #include "ui.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -139,6 +141,13 @@
 #define DEFAULT_PORT     "5000"
 #define REPLY_TIMEOUT_S  5          /* só para a resposta ao NICK */
 #define KEEPALIVE_S      120        /* M4: bem abaixo dos 300 s do servidor */
+
+/* M6 — TLS. `use_tls` liga-o; `fingerprint` é o SHA-256 do certificado do
+ * servidor, e é ele que AUTENTICA (o certificado é auto-assinado, não há
+ * autoridade nenhuma para validar). Sem fingerprint há cifra mas não há
+ * autenticação — e o cliente avisa. */
+static int         use_tls;
+static const char *fingerprint;
 
 /* Estado da ligação: um rxbuf, como cada ligação no servidor. */
 static struct rxbuf rx;
@@ -153,6 +162,19 @@ static struct rxbuf rx;
  * único inteiro. */
 static _Atomic int quitting = 0;
 
+static long now_ms(void);   /* definido abaixo; preciso no read_line */
+
+/* M6 — cobre a ligação INTEIRA, não só os envios (era o send_lock até aqui).
+ *
+ * Em TCP os dois sentidos são independentes e a thread de leitura não
+ * precisava de lock nenhum. Com TLS, o SSL* é um objeto único: ler numa
+ * thread enquanto outra escreve é comportamento indefinido. O "cliente com
+ * zero locks" do M2 acabou aqui (M6.md §D-TLS-3).
+ *
+ * Nenhuma chamada bloqueia com ele agarrado: com TLS o socket é
+ * não-bloqueante e o io_recv() devolve IO_AGAIN. */
+static pthread_mutex_t conn_lock = PTHREAD_MUTEX_INITIALIZER;
+
 /* Lê UMA linha do servidor.
  *   1 = linha em line/len | 0 = timeout | -2 = o servidor fechou (FIN)
  *  -1 = erro ou linha demasiado longa
@@ -161,9 +183,13 @@ static _Atomic int quitting = 0;
  * servidor pode ter mandado várias coladas num só segmento) e só depois ir ao
  * recv(). Ao contrário, a segunda ficava esquecida no buffer até chegarem mais
  * bytes — e com um CHAT à frente de um EVENT isso dava-se sempre. */
-static int read_line(int fd, char *line, size_t *len)
+static int read_line(struct conn_io *io, char *line, size_t *len, long timeout_ms)
 {
     char chunk[RX_CHUNK];
+    /* Com TLS o socket é NÃO-BLOQUEANTE (o lock da ligação não pode ser
+     * segurado à espera), por isso o SO_RCVTIMEO deixa de ter efeito: o
+     * prazo tem de ser contado aqui. timeout_ms < 0 = esperar sem fim. */
+    long deadline = timeout_ms >= 0 ? now_ms() + timeout_ms : 0;
 
     for (;;) {
         int r = rxbuf_next_line(&rx, line, RX_LINE_BUF, len);
@@ -179,7 +205,38 @@ static int read_line(int fd, char *line, size_t *len)
             return -1;
         }
 
-        ssize_t n = recv_retry(fd, chunk, sizeof chunk);
+        /* O lock SÓ com TLS. Em claro os dois sentidos de uma ligação TCP são
+         * independentes e o io_recv() é BLOQUEANTE: segurá-lo aqui prendia
+         * quem quisesse escrever — e no fecho dava deadlock (a thread
+         * principal à espera do lock para mandar o QUIT, a de leitura à
+         * espera de bytes que só chegam depois dele). */
+        int locked = io_is_tls(io);
+        if (locked)
+            pthread_mutex_lock(&conn_lock);
+        ssize_t n = io_recv(io, chunk, sizeof chunk);
+        if (locked)
+            pthread_mutex_unlock(&conn_lock);
+
+        if (n == IO_AGAIN) {
+            /* TLS: não há record completo. Esperar FORA do lock, para não
+             * prender quem quer escrever. */
+            long left = -1;
+            if (timeout_ms >= 0) {
+                left = deadline - now_ms();
+                if (left <= 0)
+                    return 0;               /* prazo esgotado */
+            }
+            /* Nunca mais do que 200 ms de cada vez: é o que deixa a thread
+             * de leitura reparar no `quitting` quando saímos. */
+            if (left < 0 || left > 200)
+                left = 200;
+            int w = io_wait_readable(io, -1, left);
+            if (w < 0)
+                return -1;
+            if (w == NET_TIMEOUT && timeout_ms < 0 && quitting)
+                return -2;                  /* estamos a sair */
+            continue;
+        }
         if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
             return 0;                       /* passou o SO_RCVTIMEO */
         if (n == 0)
@@ -243,8 +300,7 @@ static size_t          pending_head = 0, pending_n = 0;
 static long            ka_since     = 0;      /* ms do keepalive por responder (0 = nenhum) */
 
 /* Duas threads escrevem no socket (a principal e a do keepalive). */
-static pthread_mutex_t send_lock = PTHREAD_MUTEX_INITIALIZER;
-static long            last_sent = 0;         /* ms do último envio (send_lock) */
+static long            last_sent = 0;         /* ms do último envio (conn_lock) */
 
 static long keepalive_ms = KEEPALIVE_S * 1000L;
 
@@ -271,9 +327,9 @@ static int users_is_silent(void)
     return silent;
 }
 
-/* Codifica e envia, com o send_lock JÁ agarrado. Um LIST entra na fila ANTES
+/* Codifica e envia, com o conn_lock JÁ agarrado. Um LIST entra na fila ANTES
  * de sair (a resposta não pode chegar antes de ele lá estar). -1 = sair. */
-static int send_msg_locked(int fd, const struct msg *m, int silent)
+static int send_msg_locked(struct conn_io *io, const struct msg *m, int silent)
 {
     char   line[PROTO_LINE_BUF];
     size_t len;
@@ -293,18 +349,18 @@ static int send_msg_locked(int fd, const struct msg *m, int silent)
         pthread_mutex_unlock(&lists_lock);
     }
     last_sent = now_ms();
-    if (send_all(fd, line, len) < 0) {
+    if (io_send_all(io, line, len, -1) < 0) {   /* -1: o cliente espera o que for preciso */
         term_out(stderr, "send: %s", strerror(errno));
         return -1;
     }
     return 0;
 }
 
-static int send_msg(int fd, const struct msg *m)
+static int send_msg(struct conn_io *io, const struct msg *m)
 {
-    pthread_mutex_lock(&send_lock);
-    int rc = send_msg_locked(fd, m, 0);
-    pthread_mutex_unlock(&send_lock);
+    pthread_mutex_lock(&conn_lock);
+    int rc = send_msg_locked(io, m, 0);
+    pthread_mutex_unlock(&conn_lock);
     return rc;
 }
 
@@ -317,7 +373,7 @@ static pthread_cond_t  ka_cond;
 
 static void *keepalive_thread(void *arg)
 {
-    int  fd   = *(int *)arg;
+    struct conn_io *io = arg;
     long step = keepalive_ms / 4 < 1000 ? keepalive_ms / 4 : 1000;
 
     pthread_mutex_lock(&ka_lock);
@@ -344,12 +400,12 @@ static void *keepalive_thread(void *arg)
             term_exit(EXIT_FAILURE);          /* NÃO exit(): ver term.h */
         }
 
-        pthread_mutex_lock(&send_lock);
+        pthread_mutex_lock(&conn_lock);
         if (!quitting && since == 0 && now - last_sent >= keepalive_ms) {
             struct msg l = { .type = MT_LIST };
-            send_msg_locked(fd, &l, 1);       /* se falhar, o leitor vê o fecho */
+            send_msg_locked(io, &l, 1);       /* se falhar, o leitor vê o fecho */
         }
-        pthread_mutex_unlock(&send_lock);
+        pthread_mutex_unlock(&conn_lock);
     }
     pthread_mutex_unlock(&ka_lock);
     return NULL;
@@ -367,13 +423,13 @@ static void *keepalive_thread(void *arg)
  * fecho é esperado: basta retornar e deixar o join acontecer. */
 static void *reader_thread(void *arg)
 {
-    int         fd = *(int *)arg;
+    struct conn_io *io = arg;
     static char line[RX_LINE_BUF];           /* 64 KiB: fora da stack da thread */
     size_t      len;
     struct msg  m;
 
     for (;;) {
-        int r = read_line(fd, line, &len);
+        int r = read_line(io, line, &len, -1);
         if (r == 1) {
             show_line(line, len, &m);
             continue;
@@ -427,21 +483,21 @@ static int ask_nick(char *nick, size_t cap)
  * ERROR continua a ser recusa.
  *
  * Devolve 0 se fomos aceites (com o nick final em *nick). */
-static int do_nick(int fd, struct msg *nick)
+static int do_nick(struct conn_io *io, struct msg *nick)
 {
     static char line[RX_LINE_BUF];
     size_t      len;
     struct msg  reply;
 
 again:
-    if (send_msg(fd, nick) != 0)
+    if (send_msg(io, nick) != 0)
         return -1;
 
     /* Esperar pela resposta ao NICK: OK ou ERROR. Um servidor de outro grupo
      * pode mandar outras coisas antes (um EVENT, uma mensagem de boas-vindas):
      * mostrá-las e continuar à espera, em vez de as tomar por um OK. */
     for (;;) {
-        int r = read_line(fd, line, &len);
+        int r = read_line(io, line, &len, REPLY_TIMEOUT_S * 1000L);
         if (r == 0) {
             term_out(stderr, "[client] sem resposta do servidor em %d s", REPLY_TIMEOUT_S);
             return -1;
@@ -467,8 +523,11 @@ again:
 
 static void usage(const char *prog)
 {
-    fprintf(stderr, "uso: %s [-k segundos] [<host> [porta] [nick]]\n"
+    fprintf(stderr, "uso: %s [-k segundos] [-s] [-f fingerprint] [<host> [porta] [nick]]\n"
                     "  -k  keepalive em segundos (por omissao %d; 0 desliga)\n"
+                    "  -s  ligar por TLS (a porta do servidor costuma ser 5443)\n"
+                    "  -f  fingerprint SHA-256 do certificado do servidor (implica -s)\n"
+                    "      sem ele ha cifra mas NAO ha autenticacao\n"
                     "  sem host, procura servidores na rede (UDP):\n"
                     "  -u  porta UDP da descoberta (por omissao %s)\n"
                     "  -w  quanto tempo esperar pelas respostas, em ms (por omissao %d)\n"
@@ -532,10 +591,23 @@ int main(int argc, char *argv[])
     dopt.udp_port = (int)parse_num(DISCO_PORT_DEFAULT, 1, 65535);
 
     int opt;
-    while ((opt = getopt(argc, argv, "k:u:w:b:h")) != -1) {
+    while ((opt = getopt(argc, argv, "k:u:w:b:sf:h")) != -1) {
         long v;
         struct in_addr a;
         switch (opt) {
+        case 's':                               /* M6: ligar por TLS */
+            use_tls = 1;
+            break;
+        case 'f':                               /* M6: fingerprint esperado */
+            if (!tls_valid_fingerprint(optarg)) {
+                fprintf(stderr, "-f: fingerprint invalido (esperam-se 64 digitos "
+                                "hex, com ou sem ':')\n"
+                                "    o scripts/gen-cert.sh imprime-o no servidor\n");
+                return EXIT_FAILURE;
+            }
+            fingerprint = optarg;
+            use_tls     = 1;                    /* -f implica -s */
+            break;
         case 'k':
             if ((v = parse_num(optarg, 0, 86400)) < 0) {
                 fprintf(stderr, "-k: segundos entre 0 e 86400\n");
@@ -576,6 +648,16 @@ int main(int argc, char *argv[])
     argc -= optind - 1;                     /* argv[1] passa a ser o host */
     argv += optind - 1;
 
+    /* M6 — SIGPIPE. O net.c protege-se com MSG_NOSIGNAL em todos os send(),
+     * mas o OpenSSL escreve com write(), que não tem essa flag: um peer que
+     * feche a meio do handshake (um cliente que recusa o fingerprint, um
+     * varrimento de portas) matava o processo inteiro com SIGPIPE.
+     *
+     * É a mesma armadilha do M0 §2.2, numa forma que a defesa antiga não
+     * cobre — porque a escrita já não é nossa. Ignorar o sinal faz com que o
+     * write() devolva EPIPE, que é o que o código já sabe tratar. */
+    signal(SIGPIPE, SIG_IGN);
+
     setvbuf(stdout, NULL, _IOLBF, 0);       /* ver cada linha logo, mesmo em pipe */
 
     /* M5: sem host, procurar. Os buffers são static: host e port apontam
@@ -608,6 +690,44 @@ int main(int argc, char *argv[])
     int fd = tcp_connect(host, port);
     if (fd < 0)
         return EXIT_FAILURE;
+    struct conn_io io;
+    io_init_plain(&io, fd);
+
+    /* M6 — TLS. O handshake acontece ANTES de qualquer mensagem nossa: se o
+     * servidor não for quem diz ser, nem o NICK chega a sair. */
+    void *cctx = NULL;
+    if (use_tls) {
+        const char *why = "?";
+        cctx = tls_client_ctx(&why);
+        if (cctx == NULL) {
+            fprintf(stderr, "[client] TLS: %s\n", why);
+            close(fd);
+            return EXIT_FAILURE;
+        }
+        if (io_tls_connect(&io, fd, cctx, fingerprint,
+                           REPLY_TIMEOUT_S * 1000, &why) != 0) {
+            fprintf(stderr, "[client] TLS: %s\n", why);
+            /* A dica só faz sentido se foi MESMO o fingerprint a falhar:
+             * dá-la para um "wrong version number" (ligar com -s a uma porta
+             * em claro) mandava à procura no sítio errado. */
+            if (why == TLS_WHY_FINGERPRINT)
+                fprintf(stderr, "[client] confirma o fingerprint com quem "
+                                "tem o servidor (scripts/gen-cert.sh imprime-o)\n");
+            tls_ctx_free(cctx);
+            close(fd);
+            return EXIT_FAILURE;
+        }
+        if (fingerprint == NULL) {
+            /* Cifrado, mas sem saber com quem. Dizê-lo em voz alta: é
+             * exatamente a diferença entre o TLS servir para alguma coisa e
+             * ser decoração (M6.md §D-TLS-2). */
+            char fp[160];
+            io_peer_fingerprint(&io, fp, sizeof fp);
+            fprintf(stderr, "[client] AVISO: certificado NAO verificado "
+                            "(sem -f). Ligacao cifrada mas nao autenticada.\n"
+                            "[client] fingerprint do servidor: %s\n", fp);
+        }
+    }
 
     /* Timeout SÓ para a resposta ao NICK: impede ficar preso para sempre
      * contra um servidor que não responda. É retirado a seguir — a thread de
@@ -621,7 +741,7 @@ int main(int argc, char *argv[])
     int status = EXIT_FAILURE;
 
     /* 1. NICK tem de ser a primeira mensagem (slide 124). */
-    if (do_nick(fd, &nick) != 0)
+    if (do_nick(&io, &nick) != 0)
         goto out;
 
     tv.tv_sec = 0;                          /* sem timeout a partir daqui */
@@ -646,14 +766,14 @@ int main(int argc, char *argv[])
     pthread_cond_init(&ka_cond, &ca);
     pthread_condattr_destroy(&ca);
 
-    pthread_mutex_lock(&send_lock);
+    pthread_mutex_lock(&conn_lock);
     last_sent = now_ms();                   /* o NICK acabou de sair */
-    pthread_mutex_unlock(&send_lock);
+    pthread_mutex_unlock(&conn_lock);
 
     term_hold_signals();
-    int rc = pthread_create(&reader, NULL, reader_thread, &fd);
+    int rc = pthread_create(&reader, NULL, reader_thread, &io);
     if (rc == 0 && keepalive_ms > 0)        /* M4: -k 0 desliga */
-        keeping = pthread_create(&keeper, NULL, keepalive_thread, &fd) == 0;
+        keeping = pthread_create(&keeper, NULL, keepalive_thread, &io) == 0;
     term_release_signals();
     if (rc != 0) {
         term_stop();
@@ -694,7 +814,7 @@ int main(int argc, char *argv[])
              * é o fim esperado, não uma queda. */
             quitting = 1;
             sent_quit = 1;
-            send_msg(fd, &m);
+            send_msg(&io, &m);
             break;
         }
 
@@ -702,7 +822,7 @@ int main(int argc, char *argv[])
          * imprimíssemos também, aparecia duplicado. E num terminal a linha
          * escrita já foi apagada no Enter (term_readline): o que fica no ecrã
          * é só esse CHAT. */
-        if (send_msg(fd, &m) != 0)
+        if (send_msg(&io, &m) != 0)
             break;
 
         /* PRIV: o servidor NÃO devolve cópia (D14, revisão do M3), por isso o
@@ -741,13 +861,14 @@ int main(int argc, char *argv[])
     term_stop();
     if (!sent_quit) {
         struct msg q = { .type = MT_QUIT };
-        send_msg(fd, &q);                   /* se falhar, o fecho chega na mesma */
+        send_msg(&io, &q);                   /* se falhar, o fecho chega na mesma */
     }
-    shutdown(fd, SHUT_WR);
+    io_shutdown_wr(&io);
     pthread_join(reader, NULL);
     status = EXIT_SUCCESS;
 
 out:
-    close(fd);
+    io_close(&io);
+    tls_ctx_free(cctx);
     return status;
 }

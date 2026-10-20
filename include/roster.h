@@ -74,6 +74,7 @@
 #include <stddef.h>
 
 #include "protocol.h"
+#include "tlsio.h"
 
 /* Limite de clientes em simultâneo. Array fixo em vez de lista ligada: o
  * servidor é de uma turma, não de uma rede social, e um array torna o retrato
@@ -86,9 +87,14 @@ _Static_assert(ROSTER_MAX <= PROTO_USERS_MAX,
                "um USERS com toda a gente tem de caber numa linha");
 
 struct client {
-    /* --- da thread dona; o broadcast só lê o fd --- */
-    int  fd;                          /* -1 é válido (usado nos testes)       */
+    /* --- da thread dona; o broadcast só lê o `io` --- */
+    struct conn_io io;                /* fd (-1 é válido) + SSL* desde o M6   */
     char who[64];                     /* "ip:porta", para os logs             */
+    int  wants_tls;                   /* M6: veio pelo listener TLS; o
+                                       * handshake é feito pela thread dona,
+                                       * nunca no ciclo do accept(). Escrito
+                                       * ANTES de a thread existir, por isso
+                                       * não precisa de lock. */
 
     /* --- serializa as escritas neste socket --- */
     pthread_mutex_t wlock;
@@ -101,7 +107,7 @@ struct client {
     char nick[PROTO_NICK_MAX + 1];    /* "" até o NICK ser aceite; reservado  */
                                       /* pelo roster_claim() (M3)             */
     int  joined;                      /* 1 = está no chat (ver roster_join)   */
-    int  refs;                        /* 0 => fechar o fd e libertar          */
+    int  refs;                        /* 0 => fechar a ligação e libertar     */
     int  listed;                      /* 1 enquanto estiver em v[]            */
 };
 

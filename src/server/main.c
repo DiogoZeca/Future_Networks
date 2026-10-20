@@ -124,6 +124,7 @@
 #include "net.h"
 #include "protocol.h"
 #include "roster.h"
+#include "tlsio.h"
 #include "session.h"
 
 #include <errno.h>
@@ -163,8 +164,20 @@
  * concorrência que lhe diz respeito está dentro do roster.c. */
 static struct roster R;
 
+/* M6 — TLS. O SSL_CTX é criado uma vez no arranque e partilhado por todas as
+ * ligações: ao contrário do SSL*, um SSL_CTX PODE ser usado por várias
+ * threads. NULL = o servidor não tem porta TLS. */
+static void *tls_ctx;
+
 static long idle_ms      = IDLE_S_DEFAULT * 1000L;
 static long nick_wait_ms = NICK_WAIT_S_DEFAULT * 1000L;
+
+/* M6 — TLS. Desligado por omissão: o chat em claro é o que interopera com os
+ * outros grupos e com o nc, e é nele que assentam os testes todos. O TLS é
+ * uma porta A MAIS, nunca em vez de (M6.md §D-TLS-1). */
+static const char *tls_port  = NULL;            /* -T; NULL = sem TLS */
+static const char *cert_file = "certs/server.pem";   /* -C */
+static const char *key_file  = "certs/server.key";   /* -K */
 
 /* M5: o nome que a resposta ao DISCOVER anuncia (-N, ou o hostname). */
 static char server_name[DISCO_NAME_MAX + 1];
@@ -233,12 +246,12 @@ static int send_line_to(struct client *c, const char *line, size_t len)
     /* Re-verificar dentro do lock: podemos ter estado na fila do wlock
      * enquanto outra thread esgotava o prazo neste mesmo cliente. */
     int rc = atomic_load(&c->dead) ? -1
-           : send_all_timeout(c->fd, line, len, SEND_TIMEOUT_MS);
+           : io_send_all(&c->io, line, len, SEND_TIMEOUT_MS);
     if (rc != 0 && !atomic_exchange(&c->dead, 1)) {
         /* Só a primeira thread a falhar chega aqui (atomic_exchange). */
         if (rc == SEND_TIMEOUT_EXPIRED)
             log_warn("%s nao le ha %d ms: a desligar", c->who, SEND_TIMEOUT_MS);
-        shutdown(c->fd, SHUT_RDWR);
+        io_shutdown_rw(&c->io);
     }
     pthread_mutex_unlock(&c->wlock);
     return rc == 0 ? 0 : -1;
@@ -359,7 +372,7 @@ static enum serve_end serve(struct client *c, struct session *sess,
     for (;;) {
         /* 1. Esperar por bytes, mas não para sempre (M4). */
         long left = deadline - now_ms();
-        int  w    = left > 0 ? wait_readable(c->fd, stop_pipe[0], left) : NET_TIMEOUT;
+        int  w    = left > 0 ? io_wait_readable(&c->io, stop_pipe[0], left) : NET_TIMEOUT;
 
         if (w == NET_STOP) {                /* Ctrl+C no servidor (D24) */
             struct sess_out o;
@@ -384,7 +397,26 @@ static enum serve_end serve(struct client *c, struct session *sess,
 
         /* 2. Nunca mais do que RX_CHUNK por recv(): é essa a disciplina que
          *    garante que o rxbuf não transborda (framing.md §3.1). */
-        ssize_t n = recv_retry(c->fd, chunk, sizeof chunk);
+        /* M6 — SÓ COM TLS o lock cobre a leitura. Em TCP os dois sentidos são
+         * independentes e o io_recv() é bloqueante: segurar o lock aqui
+         * prendia todas as threads que quisessem escrever a este cliente.
+         * Com TLS o SSL* é um objeto único — ler numa thread enquanto outra
+         * escreve é comportamento indefinido — e o socket é não-bloqueante,
+         * por isso a leitura nunca fica presa com o lock na mão.
+         *
+         * Isto não recria o problema do cliente lento (§2.4): a espera é no
+         * io_wait_readable(), ACIMA e FORA do lock, e com TLS o socket é
+         * não-bloqueante, por isso o io_recv() devolve IO_AGAIN em vez de
+         * ficar preso à espera do resto de um record. */
+        int locked = io_is_tls(&c->io);
+        if (locked)
+            pthread_mutex_lock(&c->wlock);
+        ssize_t n = io_recv(&c->io, chunk, sizeof chunk);
+        if (locked)
+            pthread_mutex_unlock(&c->wlock);
+
+        if (n == IO_AGAIN)
+            continue;                       /* record incompleto: voltar a esperar */
         if (n == 0) {
             /* Se foi outra thread a desligá-lo (send_line_to: não lia), o
              * recv() também dá 0 — dizer a causa verdadeira. */
@@ -500,6 +532,23 @@ static void *client_thread(void *arg)
     struct sess_dir dir = { c, dir_claim, dir_lookup, dir_nicks };
     char            why[96] = "?";
 
+    /* M6: o handshake TLS é feito AQUI, na thread deste cliente, e nunca no
+     * ciclo do accept(): um cliente que abre a ligação e não fala (um
+     * varrimento de portas, por exemplo) prenderia o servidor inteiro. Tem
+     * prazo pela mesma razão — reaproveita-se o do NICK. */
+    if (c->wants_tls) {
+        const char *tls_why = "?";
+        if (io_tls_accept(&c->io, io_fd(&c->io), tls_ctx,
+                          (int)nick_wait_ms, &tls_why) != 0) {
+            log_info("%s: handshake TLS falhou: %s", c->who, tls_why);
+            roster_remove(&R, c);
+            client_release(&R, c);
+            thread_done();
+            return NULL;
+        }
+        log_info("%s: TLS estabelecido", c->who);
+    }
+
     session_init(&sess, &dir);
     enum serve_end end = serve(c, &sess, why, sizeof why);
 
@@ -525,7 +574,7 @@ static void *client_thread(void *arg)
      * o cliente feche também (lendo o que ainda mandar). Só então o close()
      * (no client_release) sai como FIN e não como RST. */
     if (end == END_OURS) {
-        int r = linger_drain(c->fd, stop ? STOP_LINGER_MS : LINGER_MS);
+        int r = io_linger_drain(&c->io, stop ? STOP_LINGER_MS : LINGER_MS);
         if (r == 1)
             log_debug("%s nao fechou a tempo: fecho forcado", c->who);
     }
@@ -569,13 +618,19 @@ static const char *signame(int sig)
 
 static void usage(const char *prog)
 {
-    fprintf(stderr, "uso: %s [-v | -q] [-i segundos] [-n segundos] [-u porta] [-N nome] [porta]\n"
+    fprintf(stderr, "uso: %s [-v | -q] [-i segundos] [-n segundos] [-u porta] [-N nome]\n"
+                    "            [-T porta] [-C cert] [-K chave] [porta]\n"
                     "  -v  log com DEBUG       -q  so WARN e ERROR\n"
                     "  -i  inatividade ate ao ERROR 408 (por omissao %d)\n"
                     "  -n  prazo para o NICK (por omissao %d)\n"
                     "  -u  porta UDP da descoberta (por omissao %s; 0 desliga)\n"
-                    "  -N  nome anunciado na descoberta (por omissao o hostname; ate %d bytes)\n",
-            prog, IDLE_S_DEFAULT, NICK_WAIT_S_DEFAULT, DISCO_PORT_DEFAULT, DISCO_NAME_MAX);
+                    "  -N  nome anunciado na descoberta (por omissao o hostname; ate %d bytes)\n"
+                    "  -T  porta TLS, A MAIS da porta em claro (por omissao sem TLS)\n"
+                    "  -C  certificado (por omissao %s)\n"
+                    "  -K  chave privada (por omissao %s)\n"
+                    "      gerar com: scripts/gen-cert.sh\n",
+            prog, IDLE_S_DEFAULT, NICK_WAIT_S_DEFAULT, DISCO_PORT_DEFAULT, DISCO_NAME_MAX,
+            cert_file, key_file);
 }
 
 /* "-u 5001": 0..65535 (0 = sem descoberta), ou -1. */
@@ -680,6 +735,9 @@ static void shutdown_server(int listener, int udp)
     }
     close(stop_pipe[0]);
     close(stop_pipe[1]);
+    /* Depois das threads: o SSL_CTX é partilhado por todas (M6). */
+    tls_ctx_free(tls_ctx);
+    tls_ctx = NULL;
 }
 
 int main(int argc, char *argv[])
@@ -688,9 +746,18 @@ int main(int argc, char *argv[])
     default_name(server_name);
 
     int opt;
-    while ((opt = getopt(argc, argv, "vqi:n:u:N:h")) != -1) {
+    while ((opt = getopt(argc, argv, "vqi:n:u:N:T:C:K:h")) != -1) {
         switch (opt) {
         case 'v': log_set_level(LV_DEBUG); break;
+        case 'T':                               /* M6: porta TLS (0 = sem TLS) */
+            if (parse_port(optarg) < 0) {
+                usage(argv[0]);
+                return EXIT_FAILURE;
+            }
+            tls_port = optarg;
+            break;
+        case 'C': cert_file = optarg; break;    /* M6 */
+        case 'K': key_file  = optarg; break;    /* M6 */
         case 'q': log_set_level(LV_WARN);  break;
         case 'u':
             if (parse_port(optarg) < 0) {
@@ -762,6 +829,16 @@ int main(int argc, char *argv[])
     sigaction(SIGTERM, &sa, NULL);
     sigaction(SIGHUP,  &sa, NULL);
 
+    /* M6 — SIGPIPE. O net.c protege-se com MSG_NOSIGNAL em todos os send(),
+     * mas o OpenSSL escreve com write(), que não tem essa flag: um peer que
+     * feche a meio do handshake (um cliente que recusa o fingerprint, um
+     * varrimento de portas) matava o processo inteiro com SIGPIPE.
+     *
+     * É a mesma armadilha do M0 §2.2, numa forma que a defesa antiga não
+     * cobre — porque a escrita já não é nossa. Ignorar o sinal faz com que o
+     * write() devolva EPIPE, que é o que o código já sabe tratar. */
+    signal(SIGPIPE, SIG_IGN);
+
     int listener = tcp_listen(port, 8);
     if (listener < 0)
         return EXIT_FAILURE;
@@ -789,15 +866,39 @@ int main(int argc, char *argv[])
             log_info("descoberta UDP na porta %s (nome \"%s\")", udp_port, server_name);
     }
 
+    /* M6 — a porta TLS, A MAIS da porta em claro. Se o certificado falhar, o
+     * servidor continua: o chat em claro é o que interopera com os outros
+     * grupos, e não vale a pena deitá-lo abaixo por causa de uma extensão. */
+    int tls_listener = -1;
+    if (tls_port != NULL && parse_port(tls_port) != 0) {
+        const char *why = "?";
+        tls_ctx = tls_server_ctx(cert_file, key_file, &why);
+        if (tls_ctx == NULL) {
+            log_warn("TLS desligado: %s (%s, %s)", why, cert_file, key_file);
+            log_warn("gerar o certificado com: scripts/gen-cert.sh");
+        } else {
+            tls_listener = tcp_listen(tls_port, 8);
+            if (tls_listener < 0) {
+                log_warn("TLS desligado: nao foi possivel escutar na porta %s", tls_port);
+                tls_ctx_free(tls_ctx);
+                tls_ctx = NULL;
+            } else {
+                fcntl(tls_listener, F_SETFL, fcntl(tls_listener, F_GETFL) | O_NONBLOCK);
+                log_info("TLS na porta %s (certificado %s)", tls_port, cert_file);
+            }
+        }
+    }
+
     for (;;) {
         /* Esperar por uma ligação, por um DISCOVER ou pelo pipe de paragem
          * (Ctrl+C). Um fd -1 (sem UDP) é ignorado pelo poll(). */
-        struct pollfd pf[3] = {
-            { .fd = stop_pipe[0], .events = POLLIN },
-            { .fd = listener,     .events = POLLIN },
-            { .fd = udp,          .events = POLLIN },
+        struct pollfd pf[4] = {
+            { .fd = stop_pipe[0],  .events = POLLIN },
+            { .fd = listener,      .events = POLLIN },
+            { .fd = udp,           .events = POLLIN },
+            { .fd = tls_listener,  .events = POLLIN },   /* M6; -1 se sem TLS */
         };
-        if (poll(pf, 3, -1) < 0) {
+        if (poll(pf, 4, -1) < 0) {
             if (errno == EINTR)
                 continue;
             log_error("poll: %s", strerror(errno));
@@ -807,7 +908,17 @@ int main(int argc, char *argv[])
             break;
         if (pf[2].revents != 0)
             answer_discovery(udp, tcp_port);
-        if (pf[1].revents == 0)
+
+        /* De qual das portas veio? Se as duas tiverem ligações, trata-se uma
+         * por volta — o poll() volta a acordar já a seguir. */
+        int from_tls = 0, ready = -1;
+        if (pf[1].revents != 0) {
+            ready = listener;
+        } else if (pf[3].revents != 0) {
+            ready    = tls_listener;
+            from_tls = 1;
+        }
+        if (ready < 0)
             continue;                           /* só havia UDP */
 
         struct sockaddr_storage peer;          /* cabe IPv4 ou IPv6 */
@@ -816,7 +927,7 @@ int main(int argc, char *argv[])
         /* accept() devolve um socket NOVO, só para este cliente (bloqueante:
          * o O_NONBLOCK do listener não passa para ele em Linux; e o
          * wait_readable/send_all_timeout não dependem disso). */
-        int fd = accept(listener, (struct sockaddr *)&peer, &peer_len);
+        int fd = accept(ready, (struct sockaddr *)&peer, &peer_len);
         if (fd < 0) {
             /* Um accept() falhado é quase sempre problema DESSA ligação
              * (ECONNABORTED: desistiu antes de ser aceite) ou passageiro
@@ -850,12 +961,21 @@ int main(int argc, char *argv[])
             snprintf(e.reason, sizeof e.reason, "%s", SRV_R_FULL);
             char   line[PROTO_LINE_BUF];
             size_t len;
+            /* Ainda não há struct client (o roster recusou), por isso um
+             * conn_io local. No M6 é aqui que o handshake TLS teria de ter
+             * acontecido para o 503 poder sair cifrado. */
+            struct conn_io tmp;
+            io_init_plain(&tmp, fd);
             if (proto_encode(&e, line, sizeof line, &len) == 0)
-                send_all_timeout(fd, line, len, 200);
-            linger_drain(fd, 200);
-            close(fd);
+                io_send_all(&tmp, line, len, 200);
+            io_linger_drain(&tmp, 200);
+            io_close(&tmp);
             continue;
         }
+
+        /* Antes de a thread existir: só ela lê isto, por isso não precisa de
+         * lock. O handshake é feito LÁ (M6.md §4.3c). */
+        c->wants_tls = from_tls;
 
         pthread_t tid;
         /* Detached: ninguém faz join (o encerramento espera pelo contador),

@@ -30,8 +30,7 @@
  * refs chegou a 0 — ou seja, quando mais ninguém tem o ponteiro. */
 static void destroy_client(struct client *c)
 {
-    if (c->fd >= 0)
-        close(c->fd);               /* a última referência fecha o socket */
+    io_close(&c->io);               /* a última referência fecha o socket */
     pthread_mutex_destroy(&c->wlock);
     free(c);
 }
@@ -65,7 +64,7 @@ struct client *roster_add(struct roster *r, int fd, const char *who)
     if (c == NULL)
         return NULL;
 
-    c->fd = fd;
+    io_init_plain(&c->io, fd);
     snprintf(c->who, sizeof c->who, "%s", who);
     c->nick[0] = '\0';              /* vazio até o NICK ser aceite */
     atomic_init(&c->dead, 0);       /* ninguém lhe escreve antes do add */
