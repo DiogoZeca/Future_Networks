@@ -1,20 +1,27 @@
-# Capturas
+# Packet captures
 
-Capturas de rede guardadas como prova de trabalho. O `.gitignore` ignora
-`*.pcap`/`*.pcapng` em todo o repositório **excepto** nesta pasta.
+| File | What it shows |
+|---|---|
+| `m0-handshake.pcap` | the first milestone's echo: TCP handshake (SYN / SYN-ACK / ACK), data, echo, FIN |
+| `m6-plaintext.pcap` | our client on port 5000: the `NICK` and the message `SEGREDO-123` readable on the wire |
+| `m6-tls.pcap` | the same on port 5443 (TLS 1.3): only the handshake and encrypted records — not the message, not the nick, not even the certificate (TLS 1.3 encrypts it too) |
 
-| Ficheiro | Milestone | O que mostra |
-|---|---|---|
-| `m0-handshake.pcap` | M0 | SYN / SYN-ACK / ACK, dados, eco, FIN / FIN-ACK |
-| `m6-claro.pcap` | M6 | o nosso cliente na porta 5000: o `NICK` e o `SEGREDO-123` legíveis no fio |
-| `m6-tls.pcap` | M6 | o mesmo pela porta 5443 (TLS 1.3): só o handshake e records cifrados — nem o `SEGREDO-123`, nem o nick, nem sequer o certificado (o TLS 1.3 também o cifra) |
-
-Reler sem abrir o Wireshark:
+Open them in Wireshark, or from the terminal:
 
 ```sh
 tcpdump -r docs/captures/m0-handshake.pcap -n -tt
-strings docs/captures/m6-claro.pcap | grep SEGREDO     # aparece
-strings docs/captures/m6-tls.pcap   | grep SEGREDO     # não aparece
+strings docs/captures/m6-plaintext.pcap | grep SEGREDO   # found
+strings docs/captures/m6-tls.pcap       | grep SEGREDO   # not found
 ```
 
-Como se refazem as do M6: M6.md §5.
+To record them again (loopback, needs `sudo`):
+
+```sh
+sudo tcpdump -i lo -n -U -w plain.pcap 'tcp port 5000' &
+sudo tcpdump -i lo -n -U -w tls.pcap   'tcp port 5443' &
+./bin/server -T 5443 5000 &
+printf 'SEGREDO-123\n/quit\n' | ./bin/client 127.0.0.1 5000 ana
+printf 'SEGREDO-123\n/quit\n' | ./bin/client -f <fingerprint> 127.0.0.1 5443 rui
+```
+
+`*.pcap` files are ignored by git everywhere except in this folder.

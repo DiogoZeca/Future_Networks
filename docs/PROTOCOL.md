@@ -6,12 +6,12 @@ Message names and fields come from the course slides (slide 124) and are
 
 - **(slides)** — fixed by the slides (slides 85, 123–125); needs no agreement.
 - **AGREED** — agreed with another group (so far: group 1, our first
-  contact; see the contact log in [`DECISIONS.md`](DECISIONS.md)).
+  contact).
 - **PROPOSAL** — our group's position, implemented in our server and client,
   not yet agreed with anyone.
 
 This version becomes **v1.0** once every point that can break
-interoperability (`DECISIONS.md`, section A) is AGREED.
+interoperability is AGREED between the groups.
 
 Conformance scenarios: [`tests/interop/`](../tests/interop/) — plain text, run
 against any server with `python3 scripts/interop.py <host> <port>`.
@@ -334,7 +334,7 @@ Idle and shutdown (M4):
 its TCP port; the client finds servers on the LAN with no address typed in."*
 Everything else in this section is ours (PROPOSAL) or taken from what group 1
 told us (marked *as group 1*) — **none of it has been tested between groups
-yet**; the open points are listed in `DECISIONS.md`, section "M5".
+yet**.
 
 ### 7.1 Transport
 
